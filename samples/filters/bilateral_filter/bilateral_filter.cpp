@@ -377,6 +377,12 @@ bool BilateralFilter::prepare(const vkb::ApplicationOptions &options)
 
 	queue = device->get_queue_by_flags(VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT, 0).get_handle();
 
+	uint32_t validBits = device->get_queue_by_flags(VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT, 0).get_properties().timestampValidBits;
+	assert(validBits);
+	LOGI(validBits);
+	mask = sizeof(uint64_t) * CHAR_BIT - validBits;
+	mask = ~0ULL >> mask;
+
 	create_swapchain_buffers();
 	setup_images();
 	create_command_pool();
@@ -697,10 +703,6 @@ void BilateralFilter::setup_descriptor_sets()
 void BilateralFilter::get_frame_time()
 {
 	uint64_t labels[2];
-
-	uint32_t validBits = get_device().get_gpu().get_queue_family_properties()[get_device().get_queue_family_index(VK_QUEUE_GRAPHICS_BIT)].timestampValidBits;
-	assert(validBits);
-	uint64_t mask = ~0ULL >> 64u - validBits;
 
 	auto result = vkGetQueryPoolResults(get_device().get_handle(), query_pool, 0, 2, sizeof(labels[0]) * 2,
 		&labels, sizeof(labels[0]), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
