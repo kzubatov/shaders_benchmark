@@ -91,13 +91,23 @@ private:
 
 	VkQueryPool query_pool;
 
-	Texture main_texture;
 	VkSampler nearest_sampler;
 
 	VkSampler current_sampler = VK_NULL_HANDLE;
 
 	std::unique_ptr<vkb::core::Image> storage_image;
 	std::unique_ptr<vkb::core::ImageView> storage_image_view;
+
+	struct
+	{
+		Texture 								texture;
+		std::unique_ptr<vkb::core::Image> 		image;
+		std::unique_ptr<vkb::core::ImageView> 	image_view;
+		VkFramebuffer							framebuffer;
+		VkRenderPass 							render_pass;
+		VkDescriptorSet							set;
+		VkPipeline								pipeline;
+	} main_pass {};
 
 	enum Type 
 	{
@@ -134,6 +144,7 @@ private:
 	void setup_query_pool();
 	void get_frame_time();
 	void update_descriptor_sets();
+	void setup_images();
 };
 
 std::unique_ptr<vkb::VulkanSample> create_bilateral_filter();
