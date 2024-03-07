@@ -137,6 +137,8 @@ private:
 
 	double frametime = 0.0;
 
+	uint64_t mask; 
+
 	void prepare_pipelines();
 	void setup_descriptor_pool();
 	void setup_descriptor_set_layouts();
