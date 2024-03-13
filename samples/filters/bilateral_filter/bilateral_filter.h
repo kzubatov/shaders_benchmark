@@ -26,7 +26,6 @@ public:
 	virtual ~BilateralFilter();
 
 	// Override basic framework functionality
-	virtual void request_gpu_features(vkb::PhysicalDevice &gpu) override;
 	virtual void build_command_buffers() override;
 	virtual void render(float delta_time) override;
 	virtual bool prepare(const vkb::ApplicationOptions &options) override;
@@ -35,6 +34,8 @@ public:
 	virtual void setup_framebuffer() override;
 	virtual void setup_render_pass() override;
 private:
+	static constexpr std::string_view texture_path = "textures/Lenna.ktx";
+
 	// Sample specific data
 	int32_t draw_count = 1; // for fragment shaders
 
@@ -136,14 +137,15 @@ private:
 	float sigma_r = 0.1f;
 
 	double frametime = 0.0;
+	double frametime_resolve = 0.0;
 
 	uint64_t mask; 
 
 	void prepare_pipelines();
-	void setup_descriptor_pool();
-	void setup_descriptor_set_layouts();
-	void setup_descriptor_sets();
 	void setup_query_pool();
+	void setup_descriptor_set_layouts();
+	void setup_descriptor_pool();
+	void setup_descriptor_sets();
 	void get_frame_time();
 	void update_descriptor_sets();
 	void setup_images();

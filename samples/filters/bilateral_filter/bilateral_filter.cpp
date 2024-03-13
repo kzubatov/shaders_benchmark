@@ -21,8 +21,6 @@
 BilateralFilter::BilateralFilter()
 {
 	title = "Bilateral filters collection";
-	// Because vulkan version on my mobile device is 1.1
-	add_device_extension(VK_EXT_HOST_QUERY_RESET_EXTENSION_NAME);
 }
 
 BilateralFilter::~BilateralFilter()
@@ -61,11 +59,571 @@ BilateralFilter::~BilateralFilter()
 	}
 }
 
-void BilateralFilter::request_gpu_features(vkb::PhysicalDevice &gpu)
+void BilateralFilter::build_command_buffers()
 {
-	// We need to enable the command pool reset feature in the extension struct
-	auto &requested_extension_features          = gpu.request_extension_features<VkPhysicalDeviceHostQueryResetFeaturesEXT>(VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES_EXT);
-	requested_extension_features.hostQueryReset = VK_TRUE;
+	update_descriptor_sets();
+	
+	VkCommandBufferBeginInfo command_buffer_begin_info = vkb::initializers::command_buffer_begin_info();
+
+	VkClearValue clear_values[2];
+	clear_values[0].color        = {{0.0f, 0.0f, 0.0f, 0.0f}};
+	clear_values[1].depthStencil = {0.0f, 0};
+
+	VkRenderPassBeginInfo render_pass_begin_info    = vkb::initializers::render_pass_begin_info();
+	render_pass_begin_info.renderArea.offset.x      = 0;
+	render_pass_begin_info.renderArea.offset.y      = 0;
+	render_pass_begin_info.renderArea.extent.width  = width;
+	render_pass_begin_info.renderArea.extent.height = height;
+	render_pass_begin_info.clearValueCount          = 2;
+	render_pass_begin_info.pClearValues             = clear_values;
+
+	for (int32_t i = 0; i < draw_cmd_buffers.size(); ++i)
+	{
+		auto cmd = draw_cmd_buffers[i];
+
+		vkBeginCommandBuffer(cmd, &command_buffer_begin_info);
+
+		vkCmdResetQueryPool(cmd, query_pool, 0, 4);
+
+		render_pass_begin_info.renderPass = main_pass.render_pass;
+		render_pass_begin_info.framebuffer = main_pass.framebuffer;
+
+		{
+			vkCmdBeginRenderPass(cmd, &render_pass_begin_info, VK_SUBPASS_CONTENTS_INLINE);
+
+			VkViewport viewport = vkb::initializers::viewport(static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f);
+			vkCmdSetViewport(cmd, 0, 1, &viewport);
+
+			VkRect2D scissor = vkb::initializers::rect2D(width, height, 0, 0);
+			vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, main_pass.pipeline);
+
+			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+				pipeline_layouts.resolve, 0, 1, &main_pass.set, 0, nullptr);
+
+			vkCmdDraw(cmd, 3, 1, 0, 0);
+
+			vkCmdEndRenderPass(cmd);
+		}
+
+		if (type == COMP)
+		{
+			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, bilateral_filter_comp_pipelines[pipeline_id]);
+
+			VkImageMemoryBarrier image_barrier;
+			image_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+			image_barrier.pNext = nullptr;
+			image_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			image_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			image_barrier.srcAccessMask = VK_ACCESS_NONE;
+			image_barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+			image_barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+			image_barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+			image_barrier.image = storage_image->get_handle();
+			image_barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+			
+			vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 
+				VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &image_barrier);
+
+			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layouts.compute, 0, 1, &descriptor_sets.compute, 0, nullptr);
+			
+			vkCmdPushConstants(cmd, pipeline_layouts.compute, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstCompute), &pushConstCompute);
+
+			uint32_t x_size = width / workgroup_axis_size + (width % workgroup_axis_size != 0);
+			uint32_t y_size = height / workgroup_axis_size + (height % workgroup_axis_size != 0);
+
+			vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, query_pool, 0);
+			vkCmdDispatch(cmd, x_size, y_size, 1);
+			vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool, 1);
+
+			image_barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+			image_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+			image_barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+			image_barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+			vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 
+				VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &image_barrier);
+		}
+
+		render_pass_begin_info.framebuffer = framebuffers[i];
+		render_pass_begin_info.renderPass = render_pass;
+
+		{
+			vkCmdBeginRenderPass(cmd, &render_pass_begin_info, VK_SUBPASS_CONTENTS_INLINE);
+
+			VkViewport viewport = vkb::initializers::viewport(static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f);
+			vkCmdSetViewport(cmd, 0, 1, &viewport);
+
+			VkRect2D scissor = vkb::initializers::rect2D(width, height, 0, 0);
+			vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+			switch (type)
+			{
+			case DEF:
+				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, bilateral_filter_def_pipelines[pipeline_id]);
+
+				vkCmdPushConstants(cmd, pipeline_layouts.graphics, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pushConstGraphics), &pushConstGraphics);
+
+				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layouts.graphics, 0, 1, &descriptor_sets.graphics, 0, nullptr);
+				
+				vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, query_pool, 0);
+
+				vkCmdDraw(cmd, 3, draw_count, 0, 0);
+
+				vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool, 1);
+				break;
+			case OPT:
+				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, bilateral_filter_opt_pipelines[pipeline_id]);
+
+				vkCmdPushConstants(cmd, pipeline_layouts.graphics, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pushConstGraphics), &pushConstGraphics);
+
+				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layouts.graphics, 0, 1, &descriptor_sets.graphics, 0, nullptr);
+				
+				vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, query_pool, 0);
+
+				vkCmdDraw(cmd, 3, draw_count, 0, 0);
+
+				vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool, 1);
+				break;
+			case COMP:
+				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, resolve_pipeline);
+
+				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layouts.resolve, 0, 1, &descriptor_sets.resolve, 0, nullptr);
+				
+				vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, query_pool, 2);
+				vkCmdDraw(cmd, 3, 1, 0, 0);
+				vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool, 3);
+				break;
+			default:
+				LOGE("Unknown type");
+				exit(1);
+			}
+					
+			draw_ui(cmd);
+
+			vkCmdEndRenderPass(cmd);
+		}
+
+		VK_CHECK(vkEndCommandBuffer(cmd));
+	}
+}
+
+void BilateralFilter::render(float delta_time)
+{
+	if (!prepared)
+	{
+		return;
+	}
+	ApiVulkanSample::prepare_frame();
+	submit_info.commandBufferCount = 1;
+	submit_info.pCommandBuffers    = &draw_cmd_buffers[current_buffer];
+	VK_CHECK(vkQueueSubmit(queue, 1, &submit_info, VK_NULL_HANDLE));
+	ApiVulkanSample::submit_frame();
+	get_frame_time();
+}
+
+bool BilateralFilter::prepare(const vkb::ApplicationOptions &options)
+{
+	if (!VulkanSample::prepare(options))
+	{
+		return false;
+	}
+
+	depth_format = vkb::get_suitable_depth_format(device->get_gpu().get_handle());
+
+	VkSemaphoreCreateInfo semaphore_create_info = vkb::initializers::semaphore_create_info();
+	VK_CHECK(vkCreateSemaphore(device->get_handle(), &semaphore_create_info, nullptr, &semaphores.acquired_image_ready));
+	VK_CHECK(vkCreateSemaphore(device->get_handle(), &semaphore_create_info, nullptr, &semaphores.render_complete));
+
+	submit_info                   = vkb::initializers::submit_info();
+	submit_info.pWaitDstStageMask = &submit_pipeline_stages;
+
+	if (window->get_window_mode() != vkb::Window::Mode::Headless)
+	{
+		submit_info.waitSemaphoreCount   = 1;
+		submit_info.pWaitSemaphores      = &semaphores.acquired_image_ready;
+		submit_info.signalSemaphoreCount = 1;
+		submit_info.pSignalSemaphores    = &semaphores.render_complete;
+	}
+
+	// queue = device->get_suitable_graphics_queue().get_handle();
+
+	queue = device->get_queue_by_flags(VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT, 0).get_handle();
+
+	uint32_t validBits = device->get_queue_by_flags(VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT, 0).get_properties().timestampValidBits;
+	assert(validBits);
+	LOGI(validBits);
+	mask = sizeof(uint64_t) * CHAR_BIT - validBits;
+	mask = ~0ULL >> mask;
+	LOGI(mask);
+
+	create_swapchain_buffers();
+	setup_images();
+	create_command_pool();
+	create_command_buffers();
+	create_synchronization_primitives();
+	setup_depth_stencil();
+	setup_render_pass();
+	create_pipeline_cache();
+	setup_framebuffer();
+
+	width  = get_render_context().get_surface_extent().width;
+	height = get_render_context().get_surface_extent().height;
+
+	prepare_gui();
+
+	// fill push constants
+	{
+		pushConstCompute.width = width;
+		pushConstCompute.height = height;
+		pushConstCompute.gaussian_divisor = -0.5f / (sigma_d * sigma_d);
+		pushConstCompute.intensities_divisor = -0.5f / (sigma_r * sigma_r);
+
+		pushConstGraphics.offset_width = 1.0f / width;
+		pushConstGraphics.offset_height = 1.0f / height;
+		pushConstGraphics.gaussian_divisor = pushConstCompute.gaussian_divisor;
+		pushConstGraphics.intensities_divisor = pushConstCompute.intensities_divisor;
+	}
+
+	main_pass.texture = load_texture(texture_path.data(), vkb::sg::Image::Color);
+
+	VkSamplerCreateInfo sampler_info;
+	sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+	sampler_info.pNext = nullptr;
+	sampler_info.flags = 0;
+	sampler_info.magFilter = VK_FILTER_NEAREST;
+	sampler_info.minFilter = VK_FILTER_NEAREST;
+	sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+	sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+	sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+	sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+	sampler_info.mipLodBias = 0.0f;
+	sampler_info.anisotropyEnable = VK_FALSE;
+	sampler_info.maxAnisotropy = 1.0f;
+	sampler_info.compareEnable = VK_FALSE;
+	sampler_info.compareOp = VK_COMPARE_OP_ALWAYS;
+	sampler_info.minLod = 0.0f;
+	sampler_info.maxLod = VK_LOD_CLAMP_NONE;
+	sampler_info.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+	sampler_info.unnormalizedCoordinates = VK_FALSE;
+
+	vkCreateSampler(get_device().get_handle(), &sampler_info, nullptr, &nearest_sampler);
+
+	current_sampler = nearest_sampler;
+
+	setup_query_pool();
+	setup_descriptor_set_layouts();
+	prepare_pipelines();
+	setup_descriptor_pool();
+	setup_descriptor_sets();
+	update_descriptor_sets();
+	build_command_buffers();
+	prepared = true;
+	return true;
+}
+
+void BilateralFilter::on_update_ui_overlay(vkb::Drawer &drawer)
+{
+	if (drawer.header("Select shader"))
+	{
+		uint32_t prev_pipeline_id = pipeline_id;
+		if (drawer.button("3x3"))
+		{
+			std::cout << "3x3" << std::endl;
+			pipeline_id = 0;
+		}
+		ImGui::SameLine();
+		if (drawer.button("5x5"))
+		{
+			std::cout << "5x5" << std::endl;
+			pipeline_id = 1;
+		}
+		ImGui::SameLine();
+		if (drawer.button("7x7"))
+		{
+			std::cout << "7x7" << std::endl;
+			pipeline_id = 2;
+		}
+
+		int32_t curIndex = type == COMP ? 2 : type == OPT;
+		if (drawer.combo_box("type", &curIndex, {"default", "optimized", "compute"}))
+		{
+			std::cout << "type" << std::endl;
+			type = curIndex == 0 ? DEF : curIndex == 1 ? OPT : COMP;
+		}
+
+		curIndex = current_sampler == nearest_sampler;
+		if (drawer.combo_box("sampler", &curIndex, {"linear", "nearest"}))
+		{
+			std::cout << "sampler" << std::endl;
+			current_sampler = curIndex ? nearest_sampler : main_pass.texture.sampler;
+		}
+
+		if (drawer.slider_int("draw calls count", &draw_count, 1, 256))
+		{
+			std::cout << "draw calls count" << std::endl;
+		}
+	}
+
+	if (drawer.header("Parameters"))
+	{
+		drawer.slider_float("sigma_d", &sigma_d, 0.01f, 5.0f);
+		drawer.slider_float("sigma_r", &sigma_r, 0.01f, 1.0f);
+
+		pushConstGraphics.gaussian_divisor    	= -0.5f / (sigma_d * sigma_d);
+		pushConstGraphics.intensities_divisor 	= -0.5f / (sigma_r * sigma_r);
+
+		pushConstCompute.gaussian_divisor		= pushConstGraphics.gaussian_divisor;
+		pushConstCompute.intensities_divisor	= pushConstGraphics.intensities_divisor;
+	}
+	
+	if (drawer.header("Frametime"))
+	{
+		if (type == COMP)
+		{
+			drawer.text("comput: %lf ms\nresolve: %lf ms\ntotal: %lf ms", frametime, frametime_resolve, frametime + frametime_resolve);
+		}
+		else
+		{
+			drawer.text("total: %lf ms", frametime);
+		}
+	}
+}
+
+bool BilateralFilter::resize(uint32_t _width, uint32_t _height)
+{
+	if (!prepared)
+	{
+		return false;
+	}
+
+	get_render_context().handle_surface_changes();
+
+	// Don't recreate the swapchain if the dimensions haven't changed
+	if (width == get_render_context().get_surface_extent().width && height == get_render_context().get_surface_extent().height)
+	{
+		return false;
+	}
+
+	width  = get_render_context().get_surface_extent().width;
+	height = get_render_context().get_surface_extent().height;
+
+	pushConstGraphics.offset_width 	= 1.0f / width;
+	pushConstGraphics.offset_height = 1.0f / height;
+	pushConstCompute.width 			= width;
+	pushConstCompute.height 		= height;
+
+	prepared = false;
+
+	// Ensure all operations on the device have been finished before destroying resources
+	device->wait_idle();
+
+	create_swapchain_buffers();
+	setup_images();
+
+	// Recreate the frame buffers
+	vkDestroyImageView(device->get_handle(), depth_stencil.view, nullptr);
+	vkDestroyImage(device->get_handle(), depth_stencil.image, nullptr);
+	vkFreeMemory(device->get_handle(), depth_stencil.mem, nullptr);
+	setup_depth_stencil();
+	for (uint32_t i = 0; i < framebuffers.size(); i++)
+	{
+		vkDestroyFramebuffer(device->get_handle(), framebuffers[i], nullptr);
+		framebuffers[i] = VK_NULL_HANDLE;
+	}
+
+	vkDestroyFramebuffer(device->get_handle(), main_pass.framebuffer, nullptr);
+	main_pass.framebuffer = VK_NULL_HANDLE;
+	
+	setup_framebuffer();
+
+	if ((width > 0.0f) && (height > 0.0f))
+	{
+		if (gui)
+		{
+			gui->resize(width, height);
+		}
+	}
+
+	rebuild_command_buffers();
+
+	device->wait_idle();
+
+	// Notify derived class
+	view_changed();
+
+	prepared = true;
+	return true;
+}
+
+void BilateralFilter::setup_framebuffer()
+{
+	// present framebuffers
+	{
+		VkImageView attachment;
+
+		VkFramebufferCreateInfo framebuffer_create_info = {};
+		framebuffer_create_info.sType                   = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+		framebuffer_create_info.pNext                   = NULL;
+		framebuffer_create_info.renderPass              = render_pass;
+		framebuffer_create_info.attachmentCount         = 1;
+		framebuffer_create_info.pAttachments            = &attachment;
+		framebuffer_create_info.width                   = get_render_context().get_surface_extent().width;
+		framebuffer_create_info.height                  = get_render_context().get_surface_extent().height;
+		framebuffer_create_info.layers                  = 1;
+
+		// Delete existing frame buffers
+		if (framebuffers.size() > 0)
+		{
+			for (uint32_t i = 0; i < framebuffers.size(); i++)
+			{
+				if (framebuffers[i] != VK_NULL_HANDLE)
+				{
+					vkDestroyFramebuffer(device->get_handle(), framebuffers[i], nullptr);
+				}
+			}
+		}
+
+		// Create frame buffers for every swap chain image
+		framebuffers.resize(render_context->get_render_frames().size());
+		for (uint32_t i = 0; i < framebuffers.size(); i++)
+		{
+			attachment = swapchain_buffers[i].view;
+			VK_CHECK(vkCreateFramebuffer(device->get_handle(), &framebuffer_create_info, nullptr, &framebuffers[i]));
+		}
+	}
+
+	// main framebuffer
+	{
+		VkImageView attachment = main_pass.image_view->get_handle();
+
+		VkFramebufferCreateInfo framebuffer_create_info = {};
+		framebuffer_create_info.sType                   = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+		framebuffer_create_info.pNext                   = nullptr;
+		framebuffer_create_info.renderPass              = main_pass.render_pass;
+		framebuffer_create_info.attachmentCount         = 1;
+		framebuffer_create_info.pAttachments            = &attachment;
+		framebuffer_create_info.width                   = get_render_context().get_surface_extent().width;
+		framebuffer_create_info.height                  = get_render_context().get_surface_extent().height;
+		framebuffer_create_info.layers                  = 1;
+
+		if (main_pass.framebuffer != VK_NULL_HANDLE)
+		{
+			vkDestroyFramebuffer(device->get_handle(), main_pass.framebuffer, nullptr);
+		}
+
+		vkCreateFramebuffer(device->get_handle(), &framebuffer_create_info, nullptr, &main_pass.framebuffer);
+	}
+}
+
+void BilateralFilter::setup_render_pass()
+{	
+	// present render pass
+	{
+		VkAttachmentDescription attachment;
+
+		// Color attachment
+		attachment.flags		  = 0;
+		attachment.format         = render_context->get_format();
+		attachment.samples        = VK_SAMPLE_COUNT_1_BIT;
+		attachment.loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
+		attachment.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+		attachment.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		attachment.initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+		attachment.finalLayout    = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+		VkAttachmentReference color_reference;
+		color_reference.attachment	= 0;
+		color_reference.layout		= VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+		VkSubpassDescription subpass_description;
+		subpass_description.flags 					= 0;
+		subpass_description.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
+		subpass_description.colorAttachmentCount    = 1;
+		subpass_description.pColorAttachments       = &color_reference;
+		subpass_description.pDepthStencilAttachment = nullptr;
+		subpass_description.inputAttachmentCount    = 0;
+		subpass_description.pInputAttachments       = nullptr;
+		subpass_description.preserveAttachmentCount = 0;
+		subpass_description.pPreserveAttachments    = nullptr;
+		subpass_description.pResolveAttachments     = nullptr;
+
+		VkSubpassDependency dependency;
+
+		dependency.srcSubpass      = 0;
+		dependency.dstSubpass      = VK_SUBPASS_EXTERNAL;
+		dependency.srcStageMask    = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+		dependency.dstStageMask    = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+		dependency.srcAccessMask   = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+		dependency.dstAccessMask   = VK_ACCESS_MEMORY_READ_BIT;
+		dependency.dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+
+		VkRenderPassCreateInfo render_pass_create_info = {};
+		render_pass_create_info.sType                  = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+		render_pass_create_info.attachmentCount        = 1;
+		render_pass_create_info.pAttachments           = &attachment;
+		render_pass_create_info.subpassCount           = 1;
+		render_pass_create_info.pSubpasses             = &subpass_description;
+		render_pass_create_info.dependencyCount        = 1;
+		render_pass_create_info.pDependencies          = &dependency;
+
+		VK_CHECK(vkCreateRenderPass(device->get_handle(), &render_pass_create_info, nullptr, &render_pass));
+	}
+
+	// main render pass
+	{
+		VkAttachmentDescription attachment;
+
+		// Color attachment
+		attachment.flags		  = 0;
+		attachment.format         = main_pass.image->get_format();
+		attachment.samples        = VK_SAMPLE_COUNT_1_BIT;
+		attachment.loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
+		attachment.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+		attachment.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		attachment.initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+		attachment.finalLayout    = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+		VkAttachmentReference color_reference;
+		color_reference.attachment	= 0;
+		color_reference.layout		= VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+		VkSubpassDescription subpass_description;
+		subpass_description.flags 					= 0;
+		subpass_description.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
+		subpass_description.colorAttachmentCount    = 1;
+		subpass_description.pColorAttachments       = &color_reference;
+		subpass_description.pDepthStencilAttachment = nullptr;
+		subpass_description.inputAttachmentCount    = 0;
+		subpass_description.pInputAttachments       = nullptr;
+		subpass_description.preserveAttachmentCount = 0;
+		subpass_description.pPreserveAttachments    = nullptr;
+		subpass_description.pResolveAttachments     = nullptr;
+
+		VkSubpassDependency dependency;
+
+		dependency.srcSubpass      = 0;
+		dependency.dstSubpass      = VK_SUBPASS_EXTERNAL;
+		dependency.srcStageMask    = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+		dependency.dstStageMask    = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+		dependency.srcAccessMask   = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+		dependency.dstAccessMask   = VK_ACCESS_SHADER_READ_BIT;
+		dependency.dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+
+		VkRenderPassCreateInfo render_pass_create_info = {};
+		render_pass_create_info.sType                  = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+		render_pass_create_info.attachmentCount        = 1;
+		render_pass_create_info.pAttachments           = &attachment;
+		render_pass_create_info.subpassCount           = 1;
+		render_pass_create_info.pSubpasses             = &subpass_description;
+		render_pass_create_info.dependencyCount		   = 1;
+		render_pass_create_info.pDependencies		   = &dependency;
+
+		VK_CHECK(vkCreateRenderPass(device->get_handle(), &render_pass_create_info, nullptr, &main_pass.render_pass));
+	}
 }
 
 void BilateralFilter::prepare_pipelines()
@@ -205,7 +763,7 @@ void BilateralFilter::prepare_pipelines()
 			pipeline_create_info.stageCount = vkb::to_u32(shader_stages.size());
 			pipeline_create_info.pStages 	= shader_stages.data();
 
-			VK_CHECK(vkCreateGraphicsPipelines(get_device().get_handle(), pipeline_cache, 1,
+			VK_CHECK(vkCreateGraphicsPipelines(get_device().get_handle(), VK_NULL_HANDLE, 1,
 				&pipeline_create_info, nullptr, &bilateral_filter_def_pipelines[i]));
 		}
 	}
@@ -218,7 +776,7 @@ void BilateralFilter::prepare_pipelines()
 		pipeline_create_info.stageCount = vkb::to_u32(shader_stages.size());
 		pipeline_create_info.pStages 	= shader_stages.data();
 
-		VK_CHECK(vkCreateGraphicsPipelines(get_device().get_handle(), pipeline_cache, 1,
+		VK_CHECK(vkCreateGraphicsPipelines(get_device().get_handle(), VK_NULL_HANDLE, 1,
 			&pipeline_create_info, nullptr, &bilateral_filter_opt_pipelines[i]));
 	}
 
@@ -233,13 +791,13 @@ void BilateralFilter::prepare_pipelines()
 	pipeline_create_info.stageCount = vkb::to_u32(shader_stages.size());
 	pipeline_create_info.pStages = shader_stages.data();
 
-	VK_CHECK(vkCreateGraphicsPipelines(get_device().get_handle(), pipeline_cache, 1,
+	VK_CHECK(vkCreateGraphicsPipelines(get_device().get_handle(), VK_NULL_HANDLE, 1,
 		&pipeline_create_info, nullptr, &resolve_pipeline));
 
 	// main graphics pipeline
 	pipeline_create_info.renderPass = main_pass.render_pass;
 
-	VK_CHECK(vkCreateGraphicsPipelines(get_device().get_handle(), pipeline_cache, 1,
+	VK_CHECK(vkCreateGraphicsPipelines(get_device().get_handle(), VK_NULL_HANDLE, 1,
 		&pipeline_create_info, nullptr, &main_pass.pipeline));
 
 	// compute pipelines
@@ -280,358 +838,8 @@ void BilateralFilter::prepare_pipelines()
 			compute_create_info.stage = load_shader(bilateral_filter_comp_path.data(), VK_SHADER_STAGE_COMPUTE_BIT);
 			compute_create_info.stage.pSpecializationInfo = &spec_info;
 
-			VK_CHECK(vkCreateComputePipelines(get_device().get_handle(), pipeline_cache, 1, &compute_create_info, nullptr, &bilateral_filter_comp_pipelines[i]));
+			VK_CHECK(vkCreateComputePipelines(get_device().get_handle(), VK_NULL_HANDLE, 1, &compute_create_info, nullptr, &bilateral_filter_comp_pipelines[i]));
 		}
-	}
-}
-
-// void BilateralFilter::render_main_pass()
-// {
-// 	VkCommandBufferBeginInfo begin_info;
-// 	begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-// 	begin_info.pNext = nullptr;
-// 	begin_info.flags = 0;
-// 	begin_info.pInheritanceInfo = nullptr;
-
-// 	VkImageMemoryBarrier barrier; // for output image
-	
-// 	barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-// 	barrier.pNext = nullptr;
-// 	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-// 	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-// 	barrier.srcAccessMask = VK_ACCESS_NONE;
-// 	barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-// 	barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-// 	barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-// 	barrier.image = main_pass.image->get_handle();
-// 	barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-
-// 	vkBeginCommandBuffer(main_pass.cmd, &begin_info);
-
-// 	vkCmdPipelineBarrier(main_pass.cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 
-// 		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
-
-// 	vkCmdBindPipeline(main_pass.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, resolve_pipeline);
-
-// 	vkCmdBindDescriptorSets(main_pass.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-// 		pipeline_layouts.resolve, 0, 1, &main_pass.set, 0, nullptr);
-
-// 	barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-// 	barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-// 	barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-// 	barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-// 	vkCmdPipelineBarrier(main_pass.cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 
-// 		VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
-
-// 	vkEndCommandBuffer(main_pass.cmd);
-
-// 	device->flush_command_buffer(main_pass.cmd, queue, false);
-// }
-
-void BilateralFilter::setup_images()
-{
-	VkExtent3D extent = {get_render_context().get_surface_extent().width, 
-		get_render_context().get_surface_extent().height, 1};
-
-	main_pass.image = std::make_unique<vkb::core::Image>(get_device(), extent, VK_FORMAT_R8G8B8A8_SRGB,
-		VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VMA_MEMORY_USAGE_GPU_ONLY,
-		VK_SAMPLE_COUNT_1_BIT, 1, 1, VK_IMAGE_TILING_LINEAR);
-		
-	main_pass.image_view = std::make_unique<vkb::core::ImageView>(*main_pass.image,
-		VK_IMAGE_VIEW_TYPE_2D, main_pass.image->get_format());
-
-	storage_image = std::make_unique<vkb::core::Image>(get_device(), extent, VK_FORMAT_R8G8B8A8_UNORM, 
-		VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VMA_MEMORY_USAGE_GPU_ONLY,
-		VK_SAMPLE_COUNT_1_BIT, 1, 1, VK_IMAGE_TILING_LINEAR);
-
-	storage_image_view = std::make_unique<vkb::core::ImageView>(*storage_image,
-		VK_IMAGE_VIEW_TYPE_2D, storage_image->get_format());
-}
-
-bool BilateralFilter::prepare(const vkb::ApplicationOptions &options)
-{
-	if (!VulkanSample::prepare(options))
-	{
-		return false;
-	}
-
-	depth_format = vkb::get_suitable_depth_format(device->get_gpu().get_handle());
-
-	VkSemaphoreCreateInfo semaphore_create_info = vkb::initializers::semaphore_create_info();
-	VK_CHECK(vkCreateSemaphore(device->get_handle(), &semaphore_create_info, nullptr, &semaphores.acquired_image_ready));
-	VK_CHECK(vkCreateSemaphore(device->get_handle(), &semaphore_create_info, nullptr, &semaphores.render_complete));
-
-	submit_info                   = vkb::initializers::submit_info();
-	submit_info.pWaitDstStageMask = &submit_pipeline_stages;
-
-	if (window->get_window_mode() != vkb::Window::Mode::Headless)
-	{
-		submit_info.waitSemaphoreCount   = 1;
-		submit_info.pWaitSemaphores      = &semaphores.acquired_image_ready;
-		submit_info.signalSemaphoreCount = 1;
-		submit_info.pSignalSemaphores    = &semaphores.render_complete;
-	}
-
-	// queue = device->get_suitable_graphics_queue().get_handle();
-
-	queue = device->get_queue_by_flags(VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT, 0).get_handle();
-
-	uint32_t validBits = device->get_queue_by_flags(VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT, 0).get_properties().timestampValidBits;
-	assert(validBits);
-	LOGI(validBits);
-	mask = sizeof(uint64_t) * CHAR_BIT - validBits;
-	mask = ~0ULL >> mask;
-
-	create_swapchain_buffers();
-	setup_images();
-	create_command_pool();
-	create_command_buffers();
-	create_synchronization_primitives();
-	setup_depth_stencil();
-	setup_render_pass();
-	create_pipeline_cache();
-	setup_framebuffer();
-
-	width  = get_render_context().get_surface_extent().width;
-	height = get_render_context().get_surface_extent().height;
-
-	prepare_gui();
-
-	// fill push constants
-	{
-		pushConstCompute.width = width;
-		pushConstCompute.height = height;
-		pushConstCompute.gaussian_divisor = -0.5f / (sigma_d * sigma_d);
-		pushConstCompute.intensities_divisor = -0.5f / (sigma_r * sigma_r);
-
-		pushConstGraphics.offset_width = 1.0f / width;
-		pushConstGraphics.offset_height = 1.0f / height;
-		pushConstGraphics.gaussian_divisor = pushConstCompute.gaussian_divisor;
-		pushConstGraphics.intensities_divisor = pushConstCompute.intensities_divisor;
-	}
-
-	main_pass.texture = load_texture("textures/lavaplanet_color_rgba.ktx", vkb::sg::Image::Color);
-
-	VkSamplerCreateInfo sampler_info;
-	sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-	sampler_info.pNext = nullptr;
-	sampler_info.flags = 0;
-	sampler_info.magFilter = VK_FILTER_NEAREST;
-	sampler_info.minFilter = VK_FILTER_NEAREST;
-	sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-	sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-	sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-	sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-	sampler_info.mipLodBias = 0.0f;
-	sampler_info.anisotropyEnable = VK_FALSE;
-	sampler_info.maxAnisotropy = 1.0f;
-	sampler_info.compareEnable = VK_FALSE;
-	sampler_info.compareOp = VK_COMPARE_OP_ALWAYS;
-	sampler_info.minLod = 0.0f;
-	sampler_info.maxLod = VK_LOD_CLAMP_NONE;
-	sampler_info.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
-	sampler_info.unnormalizedCoordinates = VK_FALSE;
-
-	vkCreateSampler(get_device().get_handle(), &sampler_info, nullptr, &nearest_sampler);
-
-	current_sampler = nearest_sampler;
-
-	setup_query_pool();
-	setup_descriptor_set_layouts();
-	prepare_pipelines();
-	setup_descriptor_pool();
-	setup_descriptor_sets();
-	update_descriptor_sets();
-	build_command_buffers();
-	prepared = true;
-	return true;
-}
-
-void BilateralFilter::on_update_ui_overlay(vkb::Drawer &drawer)
-{
-	if (drawer.header("Select shader"))
-	{
-		uint32_t prev_pipeline_id = pipeline_id;
-		if (drawer.button("3x3"))
-		{
-			std::cout << "3x3" << std::endl;
-			pipeline_id = 0;
-		}
-		ImGui::SameLine();
-		if (drawer.button("5x5"))
-		{
-			std::cout << "5x5" << std::endl;
-			pipeline_id = 1;
-		}
-		ImGui::SameLine();
-		if (drawer.button("7x7"))
-		{
-			std::cout << "7x7" << std::endl;
-			pipeline_id = 2;
-		}
-
-		int32_t curIndex = type == COMP ? 2 : type == OPT;
-		if (drawer.combo_box("type", &curIndex, {"default", "optimized", "compute"}))
-		{
-			std::cout << "type" << std::endl;
-			type = curIndex == 0 ? DEF : curIndex == 1 ? OPT : COMP;
-		}
-
-		curIndex = current_sampler == nearest_sampler;
-		if (drawer.combo_box("sampler", &curIndex, {"linear", "nearest"}))
-		{
-			std::cout << "sampler" << std::endl;
-			current_sampler = curIndex ? nearest_sampler : main_pass.texture.sampler;
-		}
-
-		if (drawer.slider_int("draw calls count", &draw_count, 1, 256))
-		{
-			std::cout << "draw calls count" << std::endl;
-		}
-	}
-
-	if (drawer.header("Parameters"))
-	{
-		drawer.slider_float("sigma_d", &sigma_d, 0.01f, 5.0f);
-		drawer.slider_float("sigma_r", &sigma_r, 0.01f, 1.0f);
-
-		pushConstGraphics.gaussian_divisor    	= -0.5f / (sigma_d * sigma_d);
-		pushConstGraphics.intensities_divisor 	= -0.5f / (sigma_r * sigma_r);
-
-		pushConstCompute.gaussian_divisor		= pushConstGraphics.gaussian_divisor;
-		pushConstCompute.intensities_divisor	= pushConstGraphics.intensities_divisor;
-	}
-	
-	if (drawer.header("Frametime"))
-	{
-		drawer.text("%lf ms", frametime);
-	}
-}
-
-bool BilateralFilter::resize(uint32_t _width, uint32_t _height)
-{
-	if (!prepared)
-	{
-		return false;
-	}
-
-	get_render_context().handle_surface_changes();
-
-	// Don't recreate the swapchain if the dimensions haven't changed
-	if (width == get_render_context().get_surface_extent().width && height == get_render_context().get_surface_extent().height)
-	{
-		return false;
-	}
-
-	width  = get_render_context().get_surface_extent().width;
-	height = get_render_context().get_surface_extent().height;
-
-	pushConstGraphics.offset_width 	= 1.0f / width;
-	pushConstGraphics.offset_height = 1.0f / height;
-	pushConstCompute.width 			= width;
-	pushConstCompute.height 		= height;
-
-	prepared = false;
-
-	// Ensure all operations on the device have been finished before destroying resources
-	device->wait_idle();
-
-	create_swapchain_buffers();
-	setup_images();
-
-	// Recreate the frame buffers
-	vkDestroyImageView(device->get_handle(), depth_stencil.view, nullptr);
-	vkDestroyImage(device->get_handle(), depth_stencil.image, nullptr);
-	vkFreeMemory(device->get_handle(), depth_stencil.mem, nullptr);
-	setup_depth_stencil();
-	for (uint32_t i = 0; i < framebuffers.size(); i++)
-	{
-		vkDestroyFramebuffer(device->get_handle(), framebuffers[i], nullptr);
-		framebuffers[i] = VK_NULL_HANDLE;
-	}
-
-	vkDestroyFramebuffer(device->get_handle(), main_pass.framebuffer, nullptr);
-	main_pass.framebuffer = VK_NULL_HANDLE;
-	
-	setup_framebuffer();
-
-	if ((width > 0.0f) && (height > 0.0f))
-	{
-		if (gui)
-		{
-			gui->resize(width, height);
-		}
-	}
-
-	rebuild_command_buffers();
-
-	device->wait_idle();
-
-	// Notify derived class
-	view_changed();
-
-	prepared = true;
-	return true;
-}
-
-void BilateralFilter::setup_framebuffer()
-{
-	// present framebuffers
-	{
-		VkImageView attachment;
-
-		VkFramebufferCreateInfo framebuffer_create_info = {};
-		framebuffer_create_info.sType                   = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-		framebuffer_create_info.pNext                   = NULL;
-		framebuffer_create_info.renderPass              = render_pass;
-		framebuffer_create_info.attachmentCount         = 1;
-		framebuffer_create_info.pAttachments            = &attachment;
-		framebuffer_create_info.width                   = get_render_context().get_surface_extent().width;
-		framebuffer_create_info.height                  = get_render_context().get_surface_extent().height;
-		framebuffer_create_info.layers                  = 1;
-
-		// Delete existing frame buffers
-		if (framebuffers.size() > 0)
-		{
-			for (uint32_t i = 0; i < framebuffers.size(); i++)
-			{
-				if (framebuffers[i] != VK_NULL_HANDLE)
-				{
-					vkDestroyFramebuffer(device->get_handle(), framebuffers[i], nullptr);
-				}
-			}
-		}
-
-		// Create frame buffers for every swap chain image
-		framebuffers.resize(render_context->get_render_frames().size());
-		for (uint32_t i = 0; i < framebuffers.size(); i++)
-		{
-			attachment = swapchain_buffers[i].view;
-			VK_CHECK(vkCreateFramebuffer(device->get_handle(), &framebuffer_create_info, nullptr, &framebuffers[i]));
-		}
-	}
-
-	// main framebuffer
-	{
-		VkImageView attachment = main_pass.image_view->get_handle();
-
-		VkFramebufferCreateInfo framebuffer_create_info = {};
-		framebuffer_create_info.sType                   = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-		framebuffer_create_info.pNext                   = nullptr;
-		framebuffer_create_info.renderPass              = main_pass.render_pass;
-		framebuffer_create_info.attachmentCount         = 1;
-		framebuffer_create_info.pAttachments            = &attachment;
-		framebuffer_create_info.width                   = get_render_context().get_surface_extent().width;
-		framebuffer_create_info.height                  = get_render_context().get_surface_extent().height;
-		framebuffer_create_info.layers                  = 1;
-
-		if (main_pass.framebuffer != VK_NULL_HANDLE)
-		{
-			vkDestroyFramebuffer(device->get_handle(), main_pass.framebuffer, nullptr);
-		}
-
-		vkCreateFramebuffer(device->get_handle(), &framebuffer_create_info, nullptr, &main_pass.framebuffer);
 	}
 }
 
@@ -642,13 +850,11 @@ void BilateralFilter::setup_query_pool()
 	query_pool_info.pNext = nullptr;
 	query_pool_info.flags = 0;
 	query_pool_info.queryType = VK_QUERY_TYPE_TIMESTAMP;
-	query_pool_info.queryCount = 2;
+	query_pool_info.queryCount = 4;
 	query_pool_info.pipelineStatistics = 0;
 		
 	VK_CHECK(vkCreateQueryPool(get_device().get_handle(), &query_pool_info, nullptr, &query_pool));
 }
-
-// TODO: add another one descriptor set for main_pass result and rebuild descriptors for texture
 
 void BilateralFilter::setup_descriptor_set_layouts()
 {
@@ -702,12 +908,17 @@ void BilateralFilter::setup_descriptor_sets()
 
 void BilateralFilter::get_frame_time()
 {
-	uint64_t labels[2];
+	uint64_t labels[4];
+	uint32_t count = type == COMP ? 4 : 2;
 
-	auto result = vkGetQueryPoolResults(get_device().get_handle(), query_pool, 0, 2, sizeof(labels[0]) * 2,
+	auto result = vkGetQueryPoolResults(get_device().get_handle(), query_pool, 0, count, sizeof(labels[0]) * count,
 		&labels, sizeof(labels[0]), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
 	
 	frametime = ((labels[1] & mask) - (labels[0] & mask)) * get_device().get_gpu().get_properties().limits.timestampPeriod * 1e-6;
+	if (type == COMP)
+	{
+		frametime_resolve = ((labels[3] & mask) - (labels[2] & mask)) * get_device().get_gpu().get_properties().limits.timestampPeriod * 1e-6;
+	}
 }
 
 void BilateralFilter::update_descriptor_sets()
@@ -766,286 +977,22 @@ void BilateralFilter::update_descriptor_sets()
 	}
 }
 
-void BilateralFilter::setup_render_pass()
-{	
-	// present render pass
-	{
-		VkAttachmentDescription attachment;
-
-		// Color attachment
-		attachment.flags		  = 0;
-		attachment.format         = render_context->get_format();
-		attachment.samples        = VK_SAMPLE_COUNT_1_BIT;
-		attachment.loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
-		attachment.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
-		attachment.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-		attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-		attachment.initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
-		attachment.finalLayout    = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-
-		VkAttachmentReference color_reference;
-		color_reference.attachment	= 0;
-		color_reference.layout		= VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-		VkSubpassDescription subpass_description;
-		subpass_description.flags 					= 0;
-		subpass_description.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
-		subpass_description.colorAttachmentCount    = 1;
-		subpass_description.pColorAttachments       = &color_reference;
-		subpass_description.pDepthStencilAttachment = nullptr;
-		subpass_description.inputAttachmentCount    = 0;
-		subpass_description.pInputAttachments       = nullptr;
-		subpass_description.preserveAttachmentCount = 0;
-		subpass_description.pPreserveAttachments    = nullptr;
-		subpass_description.pResolveAttachments     = nullptr;
-
-		VkSubpassDependency dependency;
-
-		dependency.srcSubpass      = 0;
-		dependency.dstSubpass      = VK_SUBPASS_EXTERNAL;
-		dependency.srcStageMask    = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-		dependency.dstStageMask    = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
-		dependency.srcAccessMask   = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-		dependency.dstAccessMask   = VK_ACCESS_MEMORY_READ_BIT;
-		dependency.dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
-
-		VkRenderPassCreateInfo render_pass_create_info = {};
-		render_pass_create_info.sType                  = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-		render_pass_create_info.attachmentCount        = 1;
-		render_pass_create_info.pAttachments           = &attachment;
-		render_pass_create_info.subpassCount           = 1;
-		render_pass_create_info.pSubpasses             = &subpass_description;
-		render_pass_create_info.dependencyCount        = 1;
-		render_pass_create_info.pDependencies          = &dependency;
-
-		VK_CHECK(vkCreateRenderPass(device->get_handle(), &render_pass_create_info, nullptr, &render_pass));
-	}
-
-	// main render pass
-	{
-		VkAttachmentDescription attachment;
-
-		// Color attachment
-		attachment.flags		  = 0;
-		attachment.format         = main_pass.image->get_format();
-		attachment.samples        = VK_SAMPLE_COUNT_1_BIT;
-		attachment.loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
-		attachment.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
-		attachment.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-		attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-		attachment.initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
-		attachment.finalLayout    = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-		VkAttachmentReference color_reference;
-		color_reference.attachment	= 0;
-		color_reference.layout		= VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-		VkSubpassDescription subpass_description;
-		subpass_description.flags 					= 0;
-		subpass_description.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
-		subpass_description.colorAttachmentCount    = 1;
-		subpass_description.pColorAttachments       = &color_reference;
-		subpass_description.pDepthStencilAttachment = nullptr;
-		subpass_description.inputAttachmentCount    = 0;
-		subpass_description.pInputAttachments       = nullptr;
-		subpass_description.preserveAttachmentCount = 0;
-		subpass_description.pPreserveAttachments    = nullptr;
-		subpass_description.pResolveAttachments     = nullptr;
-
-		VkSubpassDependency dependency;
-
-		dependency.srcSubpass      = 0;
-		dependency.dstSubpass      = VK_SUBPASS_EXTERNAL;
-		dependency.srcStageMask    = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-		dependency.dstStageMask    = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-		dependency.srcAccessMask   = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-		dependency.dstAccessMask   = VK_ACCESS_SHADER_READ_BIT;
-		dependency.dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
-
-		VkRenderPassCreateInfo render_pass_create_info = {};
-		render_pass_create_info.sType                  = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-		render_pass_create_info.attachmentCount        = 1;
-		render_pass_create_info.pAttachments           = &attachment;
-		render_pass_create_info.subpassCount           = 1;
-		render_pass_create_info.pSubpasses             = &subpass_description;
-		render_pass_create_info.dependencyCount		   = 1;
-		render_pass_create_info.pDependencies		   = &dependency;
-
-		VK_CHECK(vkCreateRenderPass(device->get_handle(), &render_pass_create_info, nullptr, &main_pass.render_pass));
-	}
-}
-
-void BilateralFilter::build_command_buffers()
+void BilateralFilter::setup_images()
 {
-	update_descriptor_sets();
-	
-	VkCommandBufferBeginInfo command_buffer_begin_info = vkb::initializers::command_buffer_begin_info();
+	VkExtent3D extent = {get_render_context().get_surface_extent().width, 
+		get_render_context().get_surface_extent().height, 1};
 
-	// Clear color and depth values.
-	VkClearValue clear_values[2];
-	clear_values[0].color        = {{0.0f, 0.0f, 0.0f, 0.0f}};
-	clear_values[1].depthStencil = {0.0f, 0};
+	main_pass.image = std::make_unique<vkb::core::Image>(get_device(), extent, VK_FORMAT_R8G8B8A8_UNORM,
+		VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+		
+	main_pass.image_view = std::make_unique<vkb::core::ImageView>(*main_pass.image,
+		VK_IMAGE_VIEW_TYPE_2D, main_pass.image->get_format());
 
-	// Begin the render pass.
-	VkRenderPassBeginInfo render_pass_begin_info    = vkb::initializers::render_pass_begin_info();
-	// render_pass_begin_info.renderPass               = render_pass;
-	render_pass_begin_info.renderArea.offset.x      = 0;
-	render_pass_begin_info.renderArea.offset.y      = 0;
-	render_pass_begin_info.renderArea.extent.width  = width;
-	render_pass_begin_info.renderArea.extent.height = height;
-	render_pass_begin_info.clearValueCount          = 2;
-	render_pass_begin_info.pClearValues             = clear_values;
+	storage_image = std::make_unique<vkb::core::Image>(get_device(), extent, VK_FORMAT_R8G8B8A8_UNORM,
+		VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 
-	for (int32_t i = 0; i < draw_cmd_buffers.size(); ++i)
-	{
-		auto cmd = draw_cmd_buffers[i];
-
-		// Begin command buffer.
-		vkBeginCommandBuffer(cmd, &command_buffer_begin_info);
-
-		vkCmdResetQueryPool(cmd, query_pool, 0, 2);
-
-		render_pass_begin_info.renderPass = main_pass.render_pass;
-		render_pass_begin_info.framebuffer = main_pass.framebuffer;
-
-		{
-			vkCmdBeginRenderPass(cmd, &render_pass_begin_info, VK_SUBPASS_CONTENTS_INLINE);
-
-			VkViewport viewport = vkb::initializers::viewport(static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f);
-			vkCmdSetViewport(cmd, 0, 1, &viewport);
-
-			VkRect2D scissor = vkb::initializers::rect2D(width, height, 0, 0);
-			vkCmdSetScissor(cmd, 0, 1, &scissor);
-
-			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, main_pass.pipeline);
-
-			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-				pipeline_layouts.resolve, 0, 1, &main_pass.set, 0, nullptr);
-
-			vkCmdDraw(cmd, 3, 1, 0, 0);
-
-			vkCmdEndRenderPass(cmd);
-		}
-
-		if (type == COMP)
-		{
-			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, bilateral_filter_comp_pipelines[pipeline_id]);
-
-			VkImageMemoryBarrier image_barrier;
-			image_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-			image_barrier.pNext = nullptr;
-			image_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-			image_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-			image_barrier.srcAccessMask = VK_ACCESS_NONE;
-			image_barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-			image_barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-			image_barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-			image_barrier.image = storage_image->get_handle();
-			image_barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-			
-			vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 
-				VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &image_barrier);
-
-			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layouts.compute, 0, 1, &descriptor_sets.compute, 0, nullptr);
-			
-			vkCmdPushConstants(cmd, pipeline_layouts.compute, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstCompute), &pushConstCompute);
-
-			uint32_t x_size = width / workgroup_axis_size + (width % workgroup_axis_size != 0);
-			uint32_t y_size = height / workgroup_axis_size + (height % workgroup_axis_size != 0);
-
-			vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, query_pool, 0);
-			vkCmdDispatch(cmd, x_size, y_size, 1);
-			vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool, 1);
-
-			image_barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-			image_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-			image_barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-			image_barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-			vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 
-				VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &image_barrier);
-		}
-
-		// Set framebuffer for this command buffer.
-		render_pass_begin_info.framebuffer = framebuffers[i];
-		render_pass_begin_info.renderPass = render_pass;
-
-		// We will add draw commands in the same command buffer.
-		{
-			vkCmdBeginRenderPass(cmd, &render_pass_begin_info, VK_SUBPASS_CONTENTS_INLINE);
-
-			// Set viewport dynamically
-			VkViewport viewport = vkb::initializers::viewport(static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f);
-			vkCmdSetViewport(cmd, 0, 1, &viewport);
-
-			// Set scissor dynamically
-			VkRect2D scissor = vkb::initializers::rect2D(width, height, 0, 0);
-			vkCmdSetScissor(cmd, 0, 1, &scissor);
-
-			switch (type)
-			{
-			case DEF:
-				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, bilateral_filter_def_pipelines[pipeline_id]);
-
-				vkCmdPushConstants(cmd, pipeline_layouts.graphics, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pushConstGraphics), &pushConstGraphics);
-
-				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layouts.graphics, 0, 1, &descriptor_sets.graphics, 0, nullptr);
-				
-				vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, query_pool, 0);
-
-				vkCmdDraw(cmd, 3, draw_count, 0, 0);
-
-				vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool, 1);
-				break;
-			case OPT:
-				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, bilateral_filter_opt_pipelines[pipeline_id]);
-
-				vkCmdPushConstants(cmd, pipeline_layouts.graphics, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pushConstGraphics), &pushConstGraphics);
-
-				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layouts.graphics, 0, 1, &descriptor_sets.graphics, 0, nullptr);
-				
-				vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, query_pool, 0);
-
-				vkCmdDraw(cmd, 3, draw_count, 0, 0);
-
-				vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool, 1);
-				break;
-			case COMP:
-				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, resolve_pipeline);
-
-				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layouts.resolve, 0, 1, &descriptor_sets.resolve, 0, nullptr);
-				
-				vkCmdDraw(cmd, 3, 1, 0, 0);
-				break;
-			default:
-				LOGE("Unknown type");
-				exit(1);
-			}
-					
-			// Draw user interface.
-			draw_ui(cmd);
-
-			// Complete render pass.
-			vkCmdEndRenderPass(cmd);
-		}
-
-		// Complete the command buffer.
-		VK_CHECK(vkEndCommandBuffer(cmd));
-	}
-}
-
-void BilateralFilter::render(float delta_time)
-{
-	if (!prepared)
-	{
-		return;
-	}
-	ApiVulkanSample::prepare_frame();
-	submit_info.commandBufferCount = 1;
-	submit_info.pCommandBuffers    = &draw_cmd_buffers[current_buffer];
-	VK_CHECK(vkQueueSubmit(queue, 1, &submit_info, VK_NULL_HANDLE));
-	ApiVulkanSample::submit_frame();
-	get_frame_time();
+	storage_image_view = std::make_unique<vkb::core::ImageView>(*storage_image,
+		VK_IMAGE_VIEW_TYPE_2D, storage_image->get_format());
 }
 
 std::unique_ptr<vkb::VulkanSample> create_bilateral_filter()
