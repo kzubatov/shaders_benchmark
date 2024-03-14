@@ -62,3 +62,6 @@
 [submodule "shaders/bilateral_filter"]
 	path = shaders/bilateral_filter
 	url = https://github.com/kzubatov/bilateral_filter.git
+[submodule "shaders/gaussian_filter"]
+	path = shaders/gaussian_filter
+	url = https://github.com/kzubatov/gaussian_filter.git
