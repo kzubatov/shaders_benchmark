@@ -43,10 +43,6 @@
 [submodule "third_party/vulkan"]
 	path = third_party/vulkan
 	url = https://github.com/KhronosGroup/Vulkan-Headers
-[submodule "assets"]
-	path = assets
-	url = https://github.com/KhronosGroup/Vulkan-Samples-Assets
-	shallow = true
 [submodule "third_party/cli11"]
 	path = third_party/cli11
 	url = https://github.com/CLIUtils/CLI11.git
@@ -65,3 +61,6 @@
 [submodule "shaders/gaussian_filter"]
 	path = shaders/gaussian_filter
 	url = https://github.com/kzubatov/gaussian_filter.git
+[submodule "assets"]
+	path = assets
+	url = https://github.com/kzubatov/Vulkan-Samples-Assets.git
