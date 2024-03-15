@@ -19,24 +19,133 @@
 
 #include "api_vulkan_sample.h"
 
+#include <utility>
+
 class GaussianFilter : public ApiVulkanSample
 {
   public:
 	GaussianFilter();
 	virtual ~GaussianFilter();
 
-	// Create pipeline
-	void prepare_pipelines();
-
 	// Override basic framework functionality
-	void build_command_buffers() override;
-	void render(float delta_time) override;
-	bool prepare(const vkb::ApplicationOptions &options) override;
+	virtual void build_command_buffers() override;
+	virtual void render(float delta_time) override;
+	virtual bool prepare(const vkb::ApplicationOptions &options) override;
+	virtual void on_update_ui_overlay(vkb::Drawer &drawer) override;
+	virtual bool resize(uint32_t width, uint32_t height) override;
+	virtual void setup_framebuffer() override;
+	virtual void setup_render_pass() override;
+private:
+	static constexpr std::string_view texture_path = "textures/Lenna.ktx";
 
-  private:
 	// Sample specific data
-	VkPipeline       sample_pipeline{};
-	VkPipelineLayout sample_pipeline_layout{};
+	int32_t draw_count = 1; // for fragment shaders
+
+	uint32_t pipeline_id = 0; // same for all shader kinds
+
+	// how many shaders of each kind
+	static constexpr uint32_t window_count = 3;
+
+	// compute shaders and pipelines
+	static constexpr std::string_view gaussian_filter_comp_path = "gaussian_filter/gaussian_blur_comp.comp";
+	static constexpr uint32_t workgroup_axis_size = 128u;
+	std::array<VkPipeline, window_count> gaussian_filter_comp_first_pass_pipelines {};
+    std::array<VkPipeline, window_count> gaussian_filter_comp_second_pass_pipelines {};
+
+	// common vertex shader for default, optimized and resolve shaders
+	static constexpr std::string_view vertex_shader_path = "quad3_vert.vert";
+	
+	// default frag shaders and pipelines
+	static constexpr std::string_view gaussian_filter_def_path = "gaussian_filter/gaussian_blur.frag";
+	std::array<VkPipeline, window_count> gaussian_filter_def_pipelines {};
+	
+	// optimized frag shaders and pipelines
+	static constexpr std::string_view gaussian_filter_opt_path = "gaussian_filter/gaussian_blur_optimized.frag";
+	std::array<VkPipeline, window_count> gaussian_filter_opt_pipelines {};
+	
+	// resolve shader and pipeline
+	static constexpr std::string_view resolve_fragment_shader_path = "simple.frag";
+	VkPipeline 				resolve_pipeline {};
+
+	struct
+	{
+		VkPipelineLayout resolve;
+		VkPipelineLayout graphics;
+		VkPipelineLayout compute;
+	} pipeline_layouts;
+
+	struct 
+	{
+		VkDescriptorSetLayout graphics_resolve; // common layout
+		VkDescriptorSetLayout compute;
+	} descriptor_set_layouts;
+
+	struct
+	{
+		VkDescriptorSet graphics;
+		std::pair<VkDescriptorSet, VkDescriptorSet> compute;
+		VkDescriptorSet resolve;
+	} descriptor_sets;
+
+	VkQueryPool query_pool;
+
+	VkSampler nearest_sampler;
+
+	VkSampler current_sampler = VK_NULL_HANDLE;
+
+	std::unique_ptr<vkb::core::Image> storage_intermediate_image;
+	std::unique_ptr<vkb::core::ImageView> storage_intermediate_image_view;
+
+    std::unique_ptr<vkb::core::Image> storage_output_image;
+	std::unique_ptr<vkb::core::ImageView> storage_output_image_view;
+
+	struct
+	{
+		Texture 								texture;
+		std::unique_ptr<vkb::core::Image> 		image;
+		std::unique_ptr<vkb::core::ImageView> 	image_view;
+		VkFramebuffer							framebuffer;
+		VkRenderPass 							render_pass;
+		VkDescriptorSet							set;
+		VkPipeline								pipeline;
+	} main_pass {};
+
+	enum Type 
+	{
+		DEF,
+		OPT,
+		COMP,
+	} type = DEF;
+
+	struct
+	{
+		float offset_width;
+		float offset_height;
+		float gaussian_divisor;
+	} pushConstGraphics;
+
+	struct
+	{
+		uint32_t width;
+		uint32_t height;
+		float gaussian_divisor;
+	} pushConstCompute;
+
+	float sigma = 3.0f;
+
+	double frametime = 0.0;
+	double frametime_resolve = 0.0;
+
+	uint64_t mask; 
+
+	void prepare_pipelines();
+	void setup_query_pool();
+	void setup_descriptor_set_layouts();
+	void setup_descriptor_pool();
+	void setup_descriptor_sets();
+	void get_frame_time();
+	void update_descriptor_sets();
+	void setup_images();
 };
 
 std::unique_ptr<vkb::VulkanSample> create_gaussian_filter();
