@@ -134,6 +134,8 @@ private:
 	float sigma = 3.0f;
 
 	double frametime = 0.0;
+	double frametime_compute_first_pass = 0.0;
+	double frametime_compute_second_pass = 0.0;
 	double frametime_resolve = 0.0;
 
 	uint64_t mask; 

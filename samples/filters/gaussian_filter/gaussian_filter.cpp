@@ -186,6 +186,7 @@ void GaussianFilter::build_command_buffers()
 		render_pass_begin_info.renderPass = render_pass;
 
 		{
+			vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, query_pool, type == COMP ? 4 : 0);
 			vkCmdBeginRenderPass(cmd, &render_pass_begin_info, VK_SUBPASS_CONTENTS_INLINE);
 
 			VkViewport viewport = vkb::initializers::viewport(static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f);
@@ -203,11 +204,11 @@ void GaussianFilter::build_command_buffers()
 
 				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layouts.graphics, 0, 1, &descriptor_sets.graphics, 0, nullptr);
 				
-				vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, query_pool, 0);
+				// vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, query_pool, 0);
 
 				vkCmdDraw(cmd, 3, draw_count, 0, 0);
 
-				vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool, 1);
+				// vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool, 1);
 				break;
 			case OPT:
 				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, gaussian_filter_opt_pipelines[pipeline_id]);
@@ -216,20 +217,20 @@ void GaussianFilter::build_command_buffers()
 
 				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layouts.graphics, 0, 1, &descriptor_sets.graphics, 0, nullptr);
 				
-				vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, query_pool, 0);
+				// vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, query_pool, 0);
 
 				vkCmdDraw(cmd, 3, draw_count, 0, 0);
 
-				vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool, 1);
+				// vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool, 1);
 				break;
 			case COMP:
 				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, resolve_pipeline);
 
 				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layouts.resolve, 0, 1, &descriptor_sets.resolve, 0, nullptr);
 				
-				vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, query_pool, 4);
+				// vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, query_pool, 4);
 				vkCmdDraw(cmd, 3, 1, 0, 0);
-				vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool, 5);
+				// vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool, 5);
 				break;
 			default:
 				LOGE("Unknown type");
@@ -239,6 +240,7 @@ void GaussianFilter::build_command_buffers()
 			draw_ui(cmd);
 
 			vkCmdEndRenderPass(cmd);
+			vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool, type == COMP ? 5 : 1);
 		}
 
 		VK_CHECK(vkEndCommandBuffer(cmd));
@@ -290,9 +292,10 @@ bool GaussianFilter::prepare(const vkb::ApplicationOptions &options)
 	uint32_t validBits = device->get_queue_by_flags(VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT, 0).get_properties().timestampValidBits;
 	assert(validBits);
 	LOGI(validBits);
-	mask = sizeof(uint64_t) * CHAR_BIT - validBits;
-	mask = ~0ULL >> mask;
-	LOGI(mask);
+	validBits = sizeof(uint64_t) * CHAR_BIT - validBits;
+	mask = 0;
+	mask = ~mask >> validBits;
+	LOGI("valid bits mask = {0:x}", mask);
 
 	create_swapchain_buffers();
 	setup_images();
@@ -412,7 +415,9 @@ void GaussianFilter::on_update_ui_overlay(vkb::Drawer &drawer)
 	{
 		if (type == COMP)
 		{
-			drawer.text("comput: %lf ms\nresolve: %lf ms\ntotal: %lf ms", frametime, frametime_resolve, frametime + frametime_resolve);
+			drawer.text("compute, first pass: %lf ms\ncompute, second pass: %lf ms\nresolve: %lf ms\ntotal: %lf ms",
+					frametime_compute_first_pass, frametime_compute_second_pass, frametime_resolve, 
+					frametime_compute_first_pass + frametime_compute_second_pass + frametime_resolve);
 		}
 		else
 		{
@@ -862,7 +867,7 @@ void GaussianFilter::prepare_pipelines()
 	compute_create_info.basePipelineIndex = 0;
 
 	{
-		std::array<VkSpecializationMapEntry, 3> map_entries;
+		std::array<VkSpecializationMapEntry, 4> map_entries;
 		map_entries[0].constantID = 0;
 		map_entries[0].offset = 0;
 		map_entries[0].size = sizeof(int32_t);
@@ -875,7 +880,11 @@ void GaussianFilter::prepare_pipelines()
 		map_entries[2].offset = 2 * sizeof(int32_t);
 		map_entries[2].size = sizeof(int32_t);
 
-		std::array<int32_t, 3> data;
+		map_entries[3].constantID = 3;
+		map_entries[3].offset = 3 * sizeof(int32_t);
+		map_entries[3].size = sizeof(int32_t);
+
+		std::array<int32_t, 4> data;
 		
 		data[0] = workgroup_axis_size;
 
@@ -888,14 +897,16 @@ void GaussianFilter::prepare_pipelines()
 		for (int i = 0; i < window_count; ++i)
 		{
 			data[1] = i + 1;
-			data[2] = ~0;
+			data[2] = workgroup_axis_size;
+			data[3] = 1;
 
 			compute_create_info.stage = load_shader(gaussian_filter_comp_path.data(), VK_SHADER_STAGE_COMPUTE_BIT);
 			compute_create_info.stage.pSpecializationInfo = &spec_info;
 
 			VK_CHECK(vkCreateComputePipelines(get_device().get_handle(), VK_NULL_HANDLE, 1, &compute_create_info, nullptr, &gaussian_filter_comp_first_pass_pipelines[i]));
 
-			data[2] = 0;
+			data[2] = 1;
+			data[3] = workgroup_axis_size;
 
 			VK_CHECK(vkCreateComputePipelines(get_device().get_handle(), VK_NULL_HANDLE, 1, &compute_create_info, nullptr, &gaussian_filter_comp_second_pass_pipelines[i]));
 		}
@@ -974,10 +985,15 @@ void GaussianFilter::get_frame_time()
 	auto result = vkGetQueryPoolResults(get_device().get_handle(), query_pool, 0, count, sizeof(labels[0]) * count,
 		&labels, sizeof(labels[0]), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
 	
-	frametime = ((labels[1] & mask) - (labels[0] & mask)) * get_device().get_gpu().get_properties().limits.timestampPeriod * 1e-6;
-	if (type == COMP)
+	if (type != COMP)
 	{
-		frametime_resolve = ((labels[3] & mask) - (labels[2] & mask)) * get_device().get_gpu().get_properties().limits.timestampPeriod * 1e-6;
+		frametime = ((labels[1] & mask) - (labels[0] & mask)) * get_device().get_gpu().get_properties().limits.timestampPeriod * 1e-6;
+	}
+	else
+	{
+		frametime_compute_first_pass = ((labels[1] & mask) - (labels[0] & mask)) * get_device().get_gpu().get_properties().limits.timestampPeriod * 1e-6;
+		frametime_compute_second_pass = ((labels[3] & mask) - (labels[2] & mask)) * get_device().get_gpu().get_properties().limits.timestampPeriod * 1e-6;
+		frametime_resolve = ((labels[5] & mask) - (labels[4] & mask)) * get_device().get_gpu().get_properties().limits.timestampPeriod * 1e-6;
 	}
 }
 
