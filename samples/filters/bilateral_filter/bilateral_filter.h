@@ -37,8 +37,6 @@ private:
 	static constexpr std::string_view texture_path = "textures/Lenna.ktx";
 
 	// Sample specific data
-	int32_t draw_count = 1; // for fragment shaders
-
 	uint32_t pipeline_id = 0; // same for all shader kinds
 
 	// how many shaders of each kind
@@ -92,10 +90,6 @@ private:
 
 	VkQueryPool query_pool;
 
-	VkSampler nearest_sampler;
-
-	VkSampler current_sampler = VK_NULL_HANDLE;
-
 	std::unique_ptr<vkb::core::Image> storage_image;
 	std::unique_ptr<vkb::core::ImageView> storage_image_view;
 
@@ -109,6 +103,9 @@ private:
 		VkDescriptorSet							set;
 		VkPipeline								pipeline;
 	} main_pass {};
+
+	VkRenderPass filter_pass;
+	std::vector<VkFramebuffer> filter_pass_framebuffers;
 
 	enum Type 
 	{
@@ -136,8 +133,13 @@ private:
 	float sigma_d = 3.0f;
 	float sigma_r = 0.1f;
 
-	double frametime = 0.0;
+	double frametime_filter  = 0.0;
 	double frametime_resolve = 0.0;
+
+	double avg_frametime_filter  = 0.0;
+	double avg_frametime_resolve = 0.0;
+
+	uint64_t n_frames = 0;
 
 	uint64_t mask; 
 
