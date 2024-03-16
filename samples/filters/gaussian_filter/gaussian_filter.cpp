@@ -40,7 +40,6 @@ GaussianFilter::~GaussianFilter()
 		}
 
 		vkDestroyPipeline(get_device().get_handle(), resolve_pipeline, nullptr);
-
 		vkDestroyPipeline(get_device().get_handle(), main_pass.pipeline, nullptr);
 
 		vkDestroyRenderPass(get_device().get_handle(), main_pass.render_pass, nullptr);
@@ -48,9 +47,7 @@ GaussianFilter::~GaussianFilter()
 		vkDestroyRenderPass(get_device().get_handle(), filter_pass, nullptr);
 
 		vkDestroyFramebuffer(get_device().get_handle(), main_pass.framebuffer, nullptr);
-		
 		vkDestroyFramebuffer(get_device().get_handle(), intermediate_filter_pass_framebuffer, nullptr);
-
 
 		for (int i = 0; i < filter_pass_framebuffers.size(); ++i)
 		{
@@ -416,7 +413,7 @@ void GaussianFilter::on_update_ui_overlay(vkb::Drawer &drawer)
 		if (type == COMP || type == LINEAR)
 		{
 			drawer.text("first pass: %lf ms\nsecond pass: %lf ms\ntotal: %lf ms",
-					frametime_first_pass, frametime_second_pass, frametime);
+				frametime_first_pass, frametime_second_pass, frametime_first_pass + frametime_second_pass);
 		}
 		else
 		{
@@ -430,7 +427,7 @@ void GaussianFilter::on_update_ui_overlay(vkb::Drawer &drawer)
 		if (type == COMP || type == LINEAR)
 		{
 			drawer.text("first pass: %lf ms\nsecond pass: %lf ms\ntotal: %lf ms",
-					avg_frametime_first_pass, avg_frametime_second_pass, avg_frametime);
+				avg_frametime_first_pass, avg_frametime_second_pass, avg_frametime_first_pass + avg_frametime_second_pass);
 		}
 		else
 		{
@@ -507,6 +504,11 @@ bool GaussianFilter::resize(uint32_t _width, uint32_t _height)
 			gui->resize(width, height);
 		}
 	}
+
+	avg_frametime = 0.0;
+	avg_frametime_first_pass = 0.0;
+	avg_frametime_second_pass = 0.0;
+	n_frames = 0;
 
 	rebuild_command_buffers();
 
@@ -690,24 +692,12 @@ void GaussianFilter::setup_render_pass()
 		subpass_description.pPreserveAttachments    = nullptr;
 		subpass_description.pResolveAttachments     = nullptr;
 
-		// VkSubpassDependency dependency;
-
-		// dependency.srcSubpass      = 0;
-		// dependency.dstSubpass      = VK_SUBPASS_EXTERNAL;
-		// dependency.srcStageMask    = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-		// dependency.dstStageMask    = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
-		// dependency.srcAccessMask   = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-		// dependency.dstAccessMask   = VK_ACCESS_MEMORY_READ_BIT;
-		// dependency.dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
-
 		VkRenderPassCreateInfo render_pass_create_info = {};
 		render_pass_create_info.sType                  = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
 		render_pass_create_info.attachmentCount        = 1;
 		render_pass_create_info.pAttachments           = &attachment;
 		render_pass_create_info.subpassCount           = 1;
 		render_pass_create_info.pSubpasses             = &subpass_description;
-		// render_pass_create_info.dependencyCount        = 1;
-		// render_pass_create_info.pDependencies          = &dependency;
 
 		VK_CHECK(vkCreateRenderPass(device->get_handle(), &render_pass_create_info, nullptr, &filter_pass));
 	}
@@ -1159,18 +1149,15 @@ void GaussianFilter::get_frame_time()
 	{
 		frametime = ((labels[1] & mask) - (labels[0] & mask)) * get_device().get_gpu().get_properties().limits.timestampPeriod * 1e-6;
 		avg_frametime = (frametime + avg_frametime * n_frames) / (n_frames + 1);
-		++n_frames;
 	}
 	else
 	{
 		frametime_first_pass = ((labels[1] & mask) - (labels[0] & mask)) * get_device().get_gpu().get_properties().limits.timestampPeriod * 1e-6;
 		frametime_second_pass = ((labels[3] & mask) - (labels[2] & mask)) * get_device().get_gpu().get_properties().limits.timestampPeriod * 1e-6;
-		frametime = frametime_first_pass + frametime_second_pass;
-		avg_frametime = (frametime + avg_frametime * n_frames) / (n_frames + 1);
 		avg_frametime_first_pass = (frametime_first_pass + avg_frametime_first_pass * n_frames) / (n_frames + 1);
 		avg_frametime_second_pass = (frametime_second_pass + avg_frametime_second_pass * n_frames) / (n_frames + 1);
-		++n_frames;
 	}
+	++n_frames;
 }
 
 void GaussianFilter::update_descriptor_sets()
