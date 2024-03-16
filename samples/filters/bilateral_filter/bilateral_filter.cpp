@@ -27,22 +27,25 @@ BilateralFilter::~BilateralFilter()
 {
 	if (device)
 	{
-		for (int i = 0; i < bilateral_filter_def_pipelines.size(); ++i)
+		for (int i = 0; i < window_count; ++i)
+		{
 			vkDestroyPipeline(get_device().get_handle(), bilateral_filter_def_pipelines[i], nullptr);
-
-		for (int i = 0; i < bilateral_filter_opt_pipelines.size(); ++i)
 			vkDestroyPipeline(get_device().get_handle(), bilateral_filter_opt_pipelines[i], nullptr);
-
-		for (int i = 0; i < bilateral_filter_comp_pipelines.size(); ++i)
 			vkDestroyPipeline(get_device().get_handle(), bilateral_filter_comp_pipelines[i], nullptr);
+		}
 
 		vkDestroyPipeline(get_device().get_handle(), resolve_pipeline, nullptr);
-
 		vkDestroyPipeline(get_device().get_handle(), main_pass.pipeline, nullptr);
 
-		vkDestroyFramebuffer(get_device().get_handle(), main_pass.framebuffer, nullptr);
+		vkDestroyRenderPass(get_device().get_handle(), main_pass.render_pass, nullptr); 
+		vkDestroyRenderPass(get_device().get_handle(), filter_pass, nullptr);
 
-		vkDestroyRenderPass(get_device().get_handle(), main_pass.render_pass, nullptr);
+		vkDestroyFramebuffer(get_device().get_handle(), main_pass.framebuffer, nullptr);
+		
+		for (int i = 0; i < filter_pass_framebuffers.size(); ++i)
+		{
+			vkDestroyFramebuffer(get_device().get_handle(), filter_pass_framebuffers[i], nullptr);
+		}
 
 		vkDestroyPipelineLayout(get_device().get_handle(), pipeline_layouts.graphics, nullptr);
 		vkDestroyPipelineLayout(get_device().get_handle(), pipeline_layouts.compute, nullptr);
@@ -53,7 +56,6 @@ BilateralFilter::~BilateralFilter()
 
 		main_pass.texture.image.reset();
 		vkDestroySampler(get_device().get_handle(), main_pass.texture.sampler, nullptr);
-		vkDestroySampler(get_device().get_handle(), nearest_sampler, nullptr);
 
 		vkDestroyQueryPool(get_device().get_handle(), query_pool, nullptr);
 	}
@@ -65,17 +67,16 @@ void BilateralFilter::build_command_buffers()
 	
 	VkCommandBufferBeginInfo command_buffer_begin_info = vkb::initializers::command_buffer_begin_info();
 
-	VkClearValue clear_values[2];
-	clear_values[0].color        = {{0.0f, 0.0f, 0.0f, 0.0f}};
-	clear_values[1].depthStencil = {0.0f, 0};
-
+	VkClearValue clear_values;
+	clear_values.color = {{0.0f, 0.0f, 0.0f, 0.0f}};
+	
 	VkRenderPassBeginInfo render_pass_begin_info    = vkb::initializers::render_pass_begin_info();
 	render_pass_begin_info.renderArea.offset.x      = 0;
 	render_pass_begin_info.renderArea.offset.y      = 0;
 	render_pass_begin_info.renderArea.extent.width  = width;
 	render_pass_begin_info.renderArea.extent.height = height;
-	render_pass_begin_info.clearValueCount          = 2;
-	render_pass_begin_info.pClearValues             = clear_values;
+	render_pass_begin_info.clearValueCount          = 1;
+	render_pass_begin_info.pClearValues             = &clear_values;
 
 	for (int32_t i = 0; i < draw_cmd_buffers.size(); ++i)
 	{
@@ -146,10 +147,12 @@ void BilateralFilter::build_command_buffers()
 				VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &image_barrier);
 		}
 
-		render_pass_begin_info.framebuffer = framebuffers[i];
-		render_pass_begin_info.renderPass = render_pass;
-
+		// filter pass (or resolve for compute)
 		{
+			render_pass_begin_info.framebuffer = filter_pass_framebuffers[i];
+			render_pass_begin_info.renderPass  = filter_pass;
+			
+			vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, query_pool, type == COMP ? 2 : 0);
 			vkCmdBeginRenderPass(cmd, &render_pass_begin_info, VK_SUBPASS_CONTENTS_INLINE);
 
 			VkViewport viewport = vkb::initializers::viewport(static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f);
@@ -166,42 +169,35 @@ void BilateralFilter::build_command_buffers()
 				vkCmdPushConstants(cmd, pipeline_layouts.graphics, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pushConstGraphics), &pushConstGraphics);
 
 				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layouts.graphics, 0, 1, &descriptor_sets.graphics, 0, nullptr);
-				
-				vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, query_pool, 0);
-
-				vkCmdDraw(cmd, 3, draw_count, 0, 0);
-
-				vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool, 1);
 				break;
 			case OPT:
 				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, bilateral_filter_opt_pipelines[pipeline_id]);
 
 				vkCmdPushConstants(cmd, pipeline_layouts.graphics, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pushConstGraphics), &pushConstGraphics);
 
-				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layouts.graphics, 0, 1, &descriptor_sets.graphics, 0, nullptr);
-				
-				vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, query_pool, 0);
-
-				vkCmdDraw(cmd, 3, draw_count, 0, 0);
-
-				vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool, 1);
+				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layouts.graphics, 0, 1, &descriptor_sets.graphics, 0, nullptr);				
 				break;
 			case COMP:
 				vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, resolve_pipeline);
 
 				vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layouts.resolve, 0, 1, &descriptor_sets.resolve, 0, nullptr);
-				
-				vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, query_pool, 2);
-				vkCmdDraw(cmd, 3, 1, 0, 0);
-				vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool, 3);
 				break;
-			default:
-				LOGE("Unknown type");
-				exit(1);
 			}
 					
-			draw_ui(cmd);
+			vkCmdDraw(cmd, 3, 1, 0, 0);
 
+			vkCmdEndRenderPass(cmd);
+			vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool, type == COMP ? 3 : 1);
+		}
+
+		{
+			render_pass_begin_info.framebuffer = framebuffers[i];
+			render_pass_begin_info.renderPass  = render_pass; 
+
+			vkCmdBeginRenderPass(cmd, &render_pass_begin_info, VK_SUBPASS_CONTENTS_INLINE);
+			
+			draw_ui(cmd);
+			
 			vkCmdEndRenderPass(cmd);
 		}
 
@@ -254,9 +250,10 @@ bool BilateralFilter::prepare(const vkb::ApplicationOptions &options)
 	uint32_t validBits = device->get_queue_by_flags(VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT, 0).get_properties().timestampValidBits;
 	assert(validBits);
 	LOGI(validBits);
-	mask = sizeof(uint64_t) * CHAR_BIT - validBits;
-	mask = ~0ULL >> mask;
-	LOGI(mask);
+	validBits = sizeof(uint64_t) * CHAR_BIT - validBits;
+	mask = 0;
+	mask = ~mask >> validBits;
+	LOGI("valid bits mask = {0:x}", mask);
 
 	create_swapchain_buffers();
 	setup_images();
@@ -288,30 +285,6 @@ bool BilateralFilter::prepare(const vkb::ApplicationOptions &options)
 
 	main_pass.texture = load_texture(texture_path.data(), vkb::sg::Image::Color);
 
-	VkSamplerCreateInfo sampler_info;
-	sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-	sampler_info.pNext = nullptr;
-	sampler_info.flags = 0;
-	sampler_info.magFilter = VK_FILTER_NEAREST;
-	sampler_info.minFilter = VK_FILTER_NEAREST;
-	sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-	sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-	sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-	sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-	sampler_info.mipLodBias = 0.0f;
-	sampler_info.anisotropyEnable = VK_FALSE;
-	sampler_info.maxAnisotropy = 1.0f;
-	sampler_info.compareEnable = VK_FALSE;
-	sampler_info.compareOp = VK_COMPARE_OP_ALWAYS;
-	sampler_info.minLod = 0.0f;
-	sampler_info.maxLod = VK_LOD_CLAMP_NONE;
-	sampler_info.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
-	sampler_info.unnormalizedCoordinates = VK_FALSE;
-
-	vkCreateSampler(get_device().get_handle(), &sampler_info, nullptr, &nearest_sampler);
-
-	current_sampler = nearest_sampler;
-
 	setup_query_pool();
 	setup_descriptor_set_layouts();
 	prepare_pipelines();
@@ -325,44 +298,33 @@ bool BilateralFilter::prepare(const vkb::ApplicationOptions &options)
 
 void BilateralFilter::on_update_ui_overlay(vkb::Drawer &drawer)
 {
+	bool reset = false;
 	if (drawer.header("Select shader"))
 	{
 		uint32_t prev_pipeline_id = pipeline_id;
 		if (drawer.button("3x3"))
 		{
-			std::cout << "3x3" << std::endl;
 			pipeline_id = 0;
+			reset = true;
 		}
 		ImGui::SameLine();
 		if (drawer.button("5x5"))
 		{
-			std::cout << "5x5" << std::endl;
 			pipeline_id = 1;
+			reset = true;
 		}
 		ImGui::SameLine();
 		if (drawer.button("7x7"))
 		{
-			std::cout << "7x7" << std::endl;
 			pipeline_id = 2;
+			reset = true;
 		}
 
 		int32_t curIndex = type == COMP ? 2 : type == OPT;
 		if (drawer.combo_box("type", &curIndex, {"default", "optimized", "compute"}))
 		{
-			std::cout << "type" << std::endl;
 			type = curIndex == 0 ? DEF : curIndex == 1 ? OPT : COMP;
-		}
-
-		curIndex = current_sampler == nearest_sampler;
-		if (drawer.combo_box("sampler", &curIndex, {"linear", "nearest"}))
-		{
-			std::cout << "sampler" << std::endl;
-			current_sampler = curIndex ? nearest_sampler : main_pass.texture.sampler;
-		}
-
-		if (drawer.slider_int("draw calls count", &draw_count, 1, 256))
-		{
-			std::cout << "draw calls count" << std::endl;
+			reset = true;
 		}
 	}
 
@@ -382,12 +344,34 @@ void BilateralFilter::on_update_ui_overlay(vkb::Drawer &drawer)
 	{
 		if (type == COMP)
 		{
-			drawer.text("comput: %lf ms\nresolve: %lf ms\ntotal: %lf ms", frametime, frametime_resolve, frametime + frametime_resolve);
+			drawer.text("compute: %lf ms\nresolve: %lf ms\ntotal: %lf ms",
+				frametime_filter, frametime_resolve, frametime_filter + frametime_resolve);
 		}
 		else
 		{
-			drawer.text("total: %lf ms", frametime);
+			drawer.text("total: %lf ms", frametime_filter);
 		}
+	}
+
+	if (drawer.header("Average frametime"))
+	{
+		drawer.text("%llu frames", n_frames);
+		if (type == COMP)
+		{
+			drawer.text("compute: %lf ms\nresolve: %lf ms\ntotal: %lf ms", 
+				avg_frametime_filter, avg_frametime_resolve, avg_frametime_filter + avg_frametime_resolve);
+		}
+		else
+		{
+			drawer.text("total: %lf ms", avg_frametime_filter);
+		}
+	}
+
+	if (reset)
+	{
+		avg_frametime_filter = 0.0;
+		avg_frametime_resolve = 0.0;
+		n_frames = 0;
 	}
 }
 
@@ -430,7 +414,9 @@ bool BilateralFilter::resize(uint32_t _width, uint32_t _height)
 	for (uint32_t i = 0; i < framebuffers.size(); i++)
 	{
 		vkDestroyFramebuffer(device->get_handle(), framebuffers[i], nullptr);
+		vkDestroyFramebuffer(device->get_handle(), filter_pass_framebuffers[i], nullptr);
 		framebuffers[i] = VK_NULL_HANDLE;
+		filter_pass_framebuffers[i] = VK_NULL_HANDLE;
 	}
 
 	vkDestroyFramebuffer(device->get_handle(), main_pass.framebuffer, nullptr);
@@ -446,6 +432,10 @@ bool BilateralFilter::resize(uint32_t _width, uint32_t _height)
 		}
 	}
 
+	avg_frametime_filter = 0.0;
+	avg_frametime_resolve = 0.0;
+	n_frames = 0;
+
 	rebuild_command_buffers();
 
 	device->wait_idle();
@@ -459,14 +449,13 @@ bool BilateralFilter::resize(uint32_t _width, uint32_t _height)
 
 void BilateralFilter::setup_framebuffer()
 {
-	// present framebuffers
+	// present and filter (or resolve) framebuffers
 	{
 		VkImageView attachment;
 
 		VkFramebufferCreateInfo framebuffer_create_info = {};
 		framebuffer_create_info.sType                   = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
 		framebuffer_create_info.pNext                   = NULL;
-		framebuffer_create_info.renderPass              = render_pass;
 		framebuffer_create_info.attachmentCount         = 1;
 		framebuffer_create_info.pAttachments            = &attachment;
 		framebuffer_create_info.width                   = get_render_context().get_surface_extent().width;
@@ -479,18 +468,22 @@ void BilateralFilter::setup_framebuffer()
 			for (uint32_t i = 0; i < framebuffers.size(); i++)
 			{
 				if (framebuffers[i] != VK_NULL_HANDLE)
-				{
 					vkDestroyFramebuffer(device->get_handle(), framebuffers[i], nullptr);
-				}
+				if (filter_pass_framebuffers[i] != VK_NULL_HANDLE)
+					vkDestroyFramebuffer(device->get_handle(), filter_pass_framebuffers[i], nullptr);
 			}
 		}
 
 		// Create frame buffers for every swap chain image
 		framebuffers.resize(render_context->get_render_frames().size());
+		filter_pass_framebuffers.resize(framebuffers.size());
 		for (uint32_t i = 0; i < framebuffers.size(); i++)
 		{
 			attachment = swapchain_buffers[i].view;
+			framebuffer_create_info.renderPass = render_pass;
 			VK_CHECK(vkCreateFramebuffer(device->get_handle(), &framebuffer_create_info, nullptr, &framebuffers[i]));
+			framebuffer_create_info.renderPass = filter_pass;
+			VK_CHECK(vkCreateFramebuffer(device->get_handle(), &framebuffer_create_info, nullptr, &filter_pass_framebuffers[i]));
 		}
 	}
 
@@ -519,7 +512,7 @@ void BilateralFilter::setup_framebuffer()
 
 void BilateralFilter::setup_render_pass()
 {	
-	// present render pass
+	// present render pass (gui render pass)
 	{
 		VkAttachmentDescription attachment;
 
@@ -527,11 +520,11 @@ void BilateralFilter::setup_render_pass()
 		attachment.flags		  = 0;
 		attachment.format         = render_context->get_format();
 		attachment.samples        = VK_SAMPLE_COUNT_1_BIT;
-		attachment.loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
+		attachment.loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD;
 		attachment.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
 		attachment.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 		attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-		attachment.initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+		attachment.initialLayout  = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 		attachment.finalLayout    = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
 		VkAttachmentReference color_reference;
@@ -554,9 +547,9 @@ void BilateralFilter::setup_render_pass()
 
 		dependency.srcSubpass      = 0;
 		dependency.dstSubpass      = VK_SUBPASS_EXTERNAL;
-		dependency.srcStageMask    = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+		dependency.srcStageMask    = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 		dependency.dstStageMask    = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
-		dependency.srcAccessMask   = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+		dependency.srcAccessMask   = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 		dependency.dstAccessMask   = VK_ACCESS_MEMORY_READ_BIT;
 		dependency.dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
 
@@ -570,6 +563,47 @@ void BilateralFilter::setup_render_pass()
 		render_pass_create_info.pDependencies          = &dependency;
 
 		VK_CHECK(vkCreateRenderPass(device->get_handle(), &render_pass_create_info, nullptr, &render_pass));
+	}
+
+	// filter pass
+	{
+		VkAttachmentDescription attachment;
+
+		// Color attachment
+		attachment.flags		  = 0;
+		attachment.format         = render_context->get_format();
+		attachment.samples        = VK_SAMPLE_COUNT_1_BIT;
+		attachment.loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
+		attachment.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+		attachment.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		attachment.initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+		attachment.finalLayout    = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+		VkAttachmentReference color_reference;
+		color_reference.attachment	= 0;
+		color_reference.layout		= VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+		VkSubpassDescription subpass_description;
+		subpass_description.flags 					= 0;
+		subpass_description.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
+		subpass_description.colorAttachmentCount    = 1;
+		subpass_description.pColorAttachments       = &color_reference;
+		subpass_description.pDepthStencilAttachment = nullptr;
+		subpass_description.inputAttachmentCount    = 0;
+		subpass_description.pInputAttachments       = nullptr;
+		subpass_description.preserveAttachmentCount = 0;
+		subpass_description.pPreserveAttachments    = nullptr;
+		subpass_description.pResolveAttachments     = nullptr;
+
+		VkRenderPassCreateInfo render_pass_create_info = {};
+		render_pass_create_info.sType                  = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+		render_pass_create_info.attachmentCount        = 1;
+		render_pass_create_info.pAttachments           = &attachment;
+		render_pass_create_info.subpassCount           = 1;
+		render_pass_create_info.pSubpasses             = &subpass_description;
+
+		VK_CHECK(vkCreateRenderPass(device->get_handle(), &render_pass_create_info, nullptr, &filter_pass));
 	}
 
 	// main render pass
@@ -733,7 +767,7 @@ void BilateralFilter::prepare_pipelines()
 	pipeline_create_info.pColorBlendState		= &blend;
 	pipeline_create_info.pDynamicState			= &dynamic;
 	pipeline_create_info.layout = pipeline_layouts.graphics;
-	pipeline_create_info.renderPass = render_pass;
+	pipeline_create_info.renderPass = filter_pass;
 	pipeline_create_info.subpass = 0;
 	pipeline_create_info.basePipelineHandle = VK_NULL_HANDLE;
 	pipeline_create_info.basePipelineIndex = 0;
@@ -914,17 +948,18 @@ void BilateralFilter::get_frame_time()
 	auto result = vkGetQueryPoolResults(get_device().get_handle(), query_pool, 0, count, sizeof(labels[0]) * count,
 		&labels, sizeof(labels[0]), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
 	
-	frametime = ((labels[1] & mask) - (labels[0] & mask)) * get_device().get_gpu().get_properties().limits.timestampPeriod * 1e-6;
+	frametime_filter = ((labels[1] & mask) - (labels[0] & mask)) * get_device().get_gpu().get_properties().limits.timestampPeriod * 1e-6;
+	avg_frametime_filter = (frametime_filter + avg_frametime_filter * n_frames) / (n_frames + 1);
 	if (type == COMP)
 	{
 		frametime_resolve = ((labels[3] & mask) - (labels[2] & mask)) * get_device().get_gpu().get_properties().limits.timestampPeriod * 1e-6;
+		avg_frametime_resolve = (frametime_resolve + avg_frametime_resolve * n_frames) / (n_frames + 1);
 	}
+	++n_frames;
 }
 
 void BilateralFilter::update_descriptor_sets()
 {
-	assert(current_sampler != VK_NULL_HANDLE);
-
 	// main pass descriptor set
 	{
 		VkDescriptorImageInfo texture_descriptor;
@@ -939,7 +974,7 @@ void BilateralFilter::update_descriptor_sets()
 	// graphics descriptor set
 	{	
 		VkDescriptorImageInfo texture_descriptor;
-		texture_descriptor.sampler = current_sampler;
+		texture_descriptor.sampler = main_pass.texture.sampler;
 		texture_descriptor.imageView = main_pass.image_view->get_handle();
 		texture_descriptor.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
@@ -952,7 +987,7 @@ void BilateralFilter::update_descriptor_sets()
 		VkDescriptorImageInfo texture_descriptor;
 		texture_descriptor.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 		texture_descriptor.imageView = storage_image_view->get_handle();
-		texture_descriptor.sampler = current_sampler;
+		texture_descriptor.sampler = main_pass.texture.sampler;
 
 		VkWriteDescriptorSet write_descriptor_set = vkb::initializers::write_descriptor_set(descriptor_sets.resolve, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 0, &texture_descriptor);
 		vkUpdateDescriptorSets(get_device().get_handle(), 1, &write_descriptor_set, 0, VK_NULL_HANDLE);
@@ -961,7 +996,7 @@ void BilateralFilter::update_descriptor_sets()
 	// compute descriptor set
 	{
 		VkDescriptorImageInfo texture_descriptor;
-		texture_descriptor.sampler = current_sampler;
+		texture_descriptor.sampler = main_pass.texture.sampler;
 		texture_descriptor.imageView = main_pass.image_view->get_handle();
 		texture_descriptor.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
