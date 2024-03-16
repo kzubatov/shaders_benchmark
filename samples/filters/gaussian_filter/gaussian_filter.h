@@ -39,8 +39,6 @@ private:
 	static constexpr std::string_view texture_path = "textures/Lenna.ktx";
 
 	// Sample specific data
-	int32_t draw_count = 1; // for fragment shaders
-
 	uint32_t pipeline_id = 0; // same for all shader kinds
 
 	// how many shaders of each kind
@@ -62,7 +60,15 @@ private:
 	// optimized frag shaders and pipelines
 	static constexpr std::string_view gaussian_filter_opt_path = "gaussian_filter/gaussian_blur_optimized.frag";
 	std::array<VkPipeline, window_count> gaussian_filter_opt_pipelines {};
-	
+
+	// vertical linear filter shaders and pipelines
+	static constexpr std::string_view gaussian_filter_linear_vert_path = "gaussian_filter/gaussian_blur_linear_vert.frag";
+	std::array<VkPipeline, window_count> gaussian_filter_linear_vert_pipelines {};
+
+	// vertical linear filter shaders and pipelines
+	static constexpr std::string_view gaussian_filter_linear_horiz_path = "gaussian_filter/gaussian_blur_linear_horiz.frag";
+	std::array<VkPipeline, window_count> gaussian_filter_linear_horiz_pipelines {};
+
 	// resolve shader and pipeline
 	static constexpr std::string_view resolve_fragment_shader_path = "simple.frag";
 	VkPipeline 				resolve_pipeline {};
@@ -82,16 +88,12 @@ private:
 
 	struct
 	{
-		VkDescriptorSet graphics;
+		std::pair<VkDescriptorSet, VkDescriptorSet> graphics;
 		std::pair<VkDescriptorSet, VkDescriptorSet> compute;
 		VkDescriptorSet resolve;
 	} descriptor_sets;
 
 	VkQueryPool query_pool;
-
-	VkSampler nearest_sampler;
-
-	VkSampler current_sampler = VK_NULL_HANDLE;
 
 	std::unique_ptr<vkb::core::Image> storage_intermediate_image;
 	std::unique_ptr<vkb::core::ImageView> storage_intermediate_image_view;
@@ -110,11 +112,21 @@ private:
 		VkPipeline								pipeline;
 	} main_pass {};
 
+	std::unique_ptr<vkb::core::Image> 		intermediate_image;
+	std::unique_ptr<vkb::core::ImageView> 	intermediate_image_view;
+
+	VkRenderPass filter_pass;
+	VkRenderPass intermediate_filter_pass;
+	
+	VkFramebuffer intermediate_filter_pass_framebuffer = VK_NULL_HANDLE;
+	std::vector<VkFramebuffer> filter_pass_framebuffers;
+
 	enum Type 
 	{
 		DEF,
 		OPT,
 		COMP,
+		LINEAR,
 	} type = DEF;
 
 	struct
@@ -134,9 +146,14 @@ private:
 	float sigma = 3.0f;
 
 	double frametime = 0.0;
-	double frametime_compute_first_pass = 0.0;
-	double frametime_compute_second_pass = 0.0;
-	double frametime_resolve = 0.0;
+	double frametime_first_pass = 0.0;
+	double frametime_second_pass = 0.0;
+
+	double avg_frametime = 0.0;
+	double avg_frametime_first_pass = 0.0;
+	double avg_frametime_second_pass = 0.0;
+
+	uint64_t n_frames = 0;
 
 	uint64_t mask; 
 
