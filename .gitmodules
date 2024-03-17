@@ -67,3 +67,6 @@
 [submodule "shaders/tent_filter"]
 	path = shaders/tent_filter
 	url = https://github.com/kzubatov/tent_filter.git
+[submodule "shaders/taa_statistics"]
+	path = shaders/taa_statistics
+	url = https://github.com/kzubatov/taa_statistics.git
