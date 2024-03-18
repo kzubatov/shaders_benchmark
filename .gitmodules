@@ -61,12 +61,12 @@
 [submodule "shaders/gaussian_filter"]
 	path = shaders/gaussian_filter
 	url = https://github.com/kzubatov/gaussian_filter.git
-[submodule "assets"]
-	path = assets
-	url = https://github.com/kzubatov/Vulkan-Samples-Assets.git
 [submodule "shaders/tent_filter"]
 	path = shaders/tent_filter
 	url = https://github.com/kzubatov/tent_filter.git
 [submodule "shaders/taa_statistics"]
 	path = shaders/taa_statistics
 	url = https://github.com/kzubatov/taa_statistics.git
+[submodule "assets"]
+	path = assets
+	url = https://github.com/kzubatov/Vulkan-Samples-Assets.git
