@@ -22,9 +22,14 @@ get_filename_component(CATEGORY_NAME ${PARENT_DIR} NAME)
 add_sample(
     ID ${FOLDER_NAME}
     CATEGORY ${CATEGORY_NAME}
-    AUTHOR "<<Contributor>>"
+    AUTHOR "Konstantin Zubatov"
     NAME "GaussianFilter"
-    DESCRIPTION "Sample description"
+    DESCRIPTION "Gaussian filters collection"
     SHADER_FILES_GLSL
-        "triangle.vert"
-        "triangle.frag")
+    "quad3_vert.vert"
+    "simple.frag"
+    "gaussian_filter/gaussian_blur.frag"
+    "gaussian_filter/gaussian_blur_optimized.frag"
+    "gaussian_filter/gaussian_blur_linear_vert.frag"
+    "gaussian_filter/gaussian_blur_linear_horiz.frag"
+    "gaussian_filter/gaussian_blur_comp.comp")
