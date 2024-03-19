@@ -136,7 +136,13 @@ set(ORDER_LIST
     "hpp_swapchain_images"
     
     #General Samples
-    "mobile_nerf")
+    "mobile_nerf"
+    
+    #Filters
+    "bilateral_filter"
+    "gaussian_filter"
+    "taa_stats"
+    "tent_filter")
 
 # Orders the sample ids by the order list above
 set(ORDERED_LIST)
