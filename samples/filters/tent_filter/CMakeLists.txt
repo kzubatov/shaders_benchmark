@@ -22,9 +22,12 @@ get_filename_component(CATEGORY_NAME ${PARENT_DIR} NAME)
 add_sample(
     ID ${FOLDER_NAME}
     CATEGORY ${CATEGORY_NAME}
-    AUTHOR "<<Contributor>>"
+    AUTHOR "Konstantin Zubatov"
     NAME "TentFilter"
-    DESCRIPTION "Sample description"
+    DESCRIPTION "Tent filters collection"
     SHADER_FILES_GLSL
-        "triangle.vert"
-        "triangle.frag")
+    "simple.frag"
+    "quad3_vert.vert"
+    "tent_filter/tent.frag"
+    "tent_filter/tent_optimized.frag"
+    "tent_filter/tent_comp.comp")

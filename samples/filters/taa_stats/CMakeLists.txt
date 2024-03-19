@@ -22,9 +22,12 @@ get_filename_component(CATEGORY_NAME ${PARENT_DIR} NAME)
 add_sample(
     ID ${FOLDER_NAME}
     CATEGORY ${CATEGORY_NAME}
-    AUTHOR "<<Contributor>>"
+    AUTHOR "Konstantin Zubatov"
     NAME "TAAStats"
-    DESCRIPTION "Sample description"
+    DESCRIPTION "First and second moments calculation"
     SHADER_FILES_GLSL
-        "triangle.vert"
-        "triangle.frag")
+        "quad3_vert.vert"
+        "simple.frag"
+        "taa_statistics/taa_comp.comp"
+        "taa_statistics/taa_default.frag"
+        "taa_statistics/taa_optimized.frag")
