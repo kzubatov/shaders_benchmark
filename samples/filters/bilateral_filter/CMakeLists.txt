@@ -22,9 +22,14 @@ get_filename_component(CATEGORY_NAME ${PARENT_DIR} NAME)
 add_sample(
     ID ${FOLDER_NAME}
     CATEGORY ${CATEGORY_NAME}
-    AUTHOR "<<Contributor>>"
+    AUTHOR "Konstantin Zubatov"
     NAME "BilateralFilter"
-    DESCRIPTION "Sample description"
+    DESCRIPTION "Bilateral filters collections"
     SHADER_FILES_GLSL
-        "triangle.vert"
-        "triangle.frag")
+    "simple.frag"
+    "quad3_vert.vert"
+    "bilateral_filter/bilateral_default_template.frag"
+    "bilateral_filter/bilateral_optimized_3x3.frag"
+    "bilateral_filter/bilateral_optimized_5x5.frag"
+    "bilateral_filter/bilateral_optimized_7x7.frag"
+    "bilateral_filter/bilateral_compute_template.comp")
