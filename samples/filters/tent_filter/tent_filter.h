@@ -145,4 +145,4 @@ private:
 	void setup_images();
 };
 
-std::unique_ptr<vkb::VulkanSample> create_tent_filter();
+std::unique_ptr<vkb::Application> create_tent_filter();

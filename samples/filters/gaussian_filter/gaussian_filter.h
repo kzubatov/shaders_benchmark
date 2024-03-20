@@ -167,4 +167,4 @@ private:
 	void setup_images();
 };
 
-std::unique_ptr<vkb::VulkanSample> create_gaussian_filter();
+std::unique_ptr<vkb::Application> create_gaussian_filter();

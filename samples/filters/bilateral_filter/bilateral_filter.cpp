@@ -25,7 +25,7 @@ BilateralFilter::BilateralFilter()
 
 BilateralFilter::~BilateralFilter()
 {
-	if (device)
+	if (has_device())
 	{
 		for (int i = 0; i < window_count; ++i)
 		{
@@ -226,11 +226,11 @@ bool BilateralFilter::prepare(const vkb::ApplicationOptions &options)
 		return false;
 	}
 
-	depth_format = vkb::get_suitable_depth_format(device->get_gpu().get_handle());
+	depth_format = vkb::get_suitable_depth_format(get_device().get_gpu().get_handle());
 
 	VkSemaphoreCreateInfo semaphore_create_info = vkb::initializers::semaphore_create_info();
-	VK_CHECK(vkCreateSemaphore(device->get_handle(), &semaphore_create_info, nullptr, &semaphores.acquired_image_ready));
-	VK_CHECK(vkCreateSemaphore(device->get_handle(), &semaphore_create_info, nullptr, &semaphores.render_complete));
+	VK_CHECK(vkCreateSemaphore(get_device().get_handle(), &semaphore_create_info, nullptr, &semaphores.acquired_image_ready));
+	VK_CHECK(vkCreateSemaphore(get_device().get_handle(), &semaphore_create_info, nullptr, &semaphores.render_complete));
 
 	submit_info                   = vkb::initializers::submit_info();
 	submit_info.pWaitDstStageMask = &submit_pipeline_stages;
@@ -243,11 +243,11 @@ bool BilateralFilter::prepare(const vkb::ApplicationOptions &options)
 		submit_info.pSignalSemaphores    = &semaphores.render_complete;
 	}
 
-	// queue = device->get_suitable_graphics_queue().get_handle();
+	// queue = get_device().get_suitable_graphics_queue().get_handle();
 
-	queue = device->get_queue_by_flags(VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT, 0).get_handle();
+	queue = get_device().get_queue_by_flags(VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT, 0).get_handle();
 
-	uint32_t validBits = device->get_queue_by_flags(VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT, 0).get_properties().timestampValidBits;
+	uint32_t validBits = get_device().get_queue_by_flags(VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT, 0).get_properties().timestampValidBits;
 	assert(validBits);
 	LOGI(validBits);
 	validBits = sizeof(uint64_t) * CHAR_BIT - validBits;
@@ -401,34 +401,34 @@ bool BilateralFilter::resize(uint32_t _width, uint32_t _height)
 	prepared = false;
 
 	// Ensure all operations on the device have been finished before destroying resources
-	device->wait_idle();
+	get_device().wait_idle();
 
 	create_swapchain_buffers();
 	setup_images();
 
 	// Recreate the frame buffers
-	vkDestroyImageView(device->get_handle(), depth_stencil.view, nullptr);
-	vkDestroyImage(device->get_handle(), depth_stencil.image, nullptr);
-	vkFreeMemory(device->get_handle(), depth_stencil.mem, nullptr);
+	vkDestroyImageView(get_device().get_handle(), depth_stencil.view, nullptr);
+	vkDestroyImage(get_device().get_handle(), depth_stencil.image, nullptr);
+	vkFreeMemory(get_device().get_handle(), depth_stencil.mem, nullptr);
 	setup_depth_stencil();
 	for (uint32_t i = 0; i < framebuffers.size(); i++)
 	{
-		vkDestroyFramebuffer(device->get_handle(), framebuffers[i], nullptr);
-		vkDestroyFramebuffer(device->get_handle(), filter_pass_framebuffers[i], nullptr);
+		vkDestroyFramebuffer(get_device().get_handle(), framebuffers[i], nullptr);
+		vkDestroyFramebuffer(get_device().get_handle(), filter_pass_framebuffers[i], nullptr);
 		framebuffers[i] = VK_NULL_HANDLE;
 		filter_pass_framebuffers[i] = VK_NULL_HANDLE;
 	}
 
-	vkDestroyFramebuffer(device->get_handle(), main_pass.framebuffer, nullptr);
+	vkDestroyFramebuffer(get_device().get_handle(), main_pass.framebuffer, nullptr);
 	main_pass.framebuffer = VK_NULL_HANDLE;
 	
 	setup_framebuffer();
 
 	if ((width > 0.0f) && (height > 0.0f))
 	{
-		if (gui)
+		if (has_gui())
 		{
-			gui->resize(width, height);
+			get_gui().resize(width, height);
 		}
 	}
 
@@ -438,7 +438,7 @@ bool BilateralFilter::resize(uint32_t _width, uint32_t _height)
 
 	rebuild_command_buffers();
 
-	device->wait_idle();
+	get_device().wait_idle();
 
 	// Notify derived class
 	view_changed();
@@ -468,22 +468,22 @@ void BilateralFilter::setup_framebuffer()
 			for (uint32_t i = 0; i < framebuffers.size(); i++)
 			{
 				if (framebuffers[i] != VK_NULL_HANDLE)
-					vkDestroyFramebuffer(device->get_handle(), framebuffers[i], nullptr);
+					vkDestroyFramebuffer(get_device().get_handle(), framebuffers[i], nullptr);
 				if (filter_pass_framebuffers[i] != VK_NULL_HANDLE)
-					vkDestroyFramebuffer(device->get_handle(), filter_pass_framebuffers[i], nullptr);
+					vkDestroyFramebuffer(get_device().get_handle(), filter_pass_framebuffers[i], nullptr);
 			}
 		}
 
 		// Create frame buffers for every swap chain image
-		framebuffers.resize(render_context->get_render_frames().size());
+		framebuffers.resize(get_render_context().get_render_frames().size());
 		filter_pass_framebuffers.resize(framebuffers.size());
 		for (uint32_t i = 0; i < framebuffers.size(); i++)
 		{
 			attachment = swapchain_buffers[i].view;
 			framebuffer_create_info.renderPass = render_pass;
-			VK_CHECK(vkCreateFramebuffer(device->get_handle(), &framebuffer_create_info, nullptr, &framebuffers[i]));
+			VK_CHECK(vkCreateFramebuffer(get_device().get_handle(), &framebuffer_create_info, nullptr, &framebuffers[i]));
 			framebuffer_create_info.renderPass = filter_pass;
-			VK_CHECK(vkCreateFramebuffer(device->get_handle(), &framebuffer_create_info, nullptr, &filter_pass_framebuffers[i]));
+			VK_CHECK(vkCreateFramebuffer(get_device().get_handle(), &framebuffer_create_info, nullptr, &filter_pass_framebuffers[i]));
 		}
 	}
 
@@ -503,10 +503,10 @@ void BilateralFilter::setup_framebuffer()
 
 		if (main_pass.framebuffer != VK_NULL_HANDLE)
 		{
-			vkDestroyFramebuffer(device->get_handle(), main_pass.framebuffer, nullptr);
+			vkDestroyFramebuffer(get_device().get_handle(), main_pass.framebuffer, nullptr);
 		}
 
-		vkCreateFramebuffer(device->get_handle(), &framebuffer_create_info, nullptr, &main_pass.framebuffer);
+		vkCreateFramebuffer(get_device().get_handle(), &framebuffer_create_info, nullptr, &main_pass.framebuffer);
 	}
 }
 
@@ -518,7 +518,7 @@ void BilateralFilter::setup_render_pass()
 
 		// Color attachment
 		attachment.flags		  = 0;
-		attachment.format         = render_context->get_format();
+		attachment.format         = get_render_context().get_format();
 		attachment.samples        = VK_SAMPLE_COUNT_1_BIT;
 		attachment.loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD;
 		attachment.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
@@ -562,7 +562,7 @@ void BilateralFilter::setup_render_pass()
 		render_pass_create_info.dependencyCount        = 1;
 		render_pass_create_info.pDependencies          = &dependency;
 
-		VK_CHECK(vkCreateRenderPass(device->get_handle(), &render_pass_create_info, nullptr, &render_pass));
+		VK_CHECK(vkCreateRenderPass(get_device().get_handle(), &render_pass_create_info, nullptr, &render_pass));
 	}
 
 	// filter pass
@@ -571,7 +571,7 @@ void BilateralFilter::setup_render_pass()
 
 		// Color attachment
 		attachment.flags		  = 0;
-		attachment.format         = render_context->get_format();
+		attachment.format         = get_render_context().get_format();
 		attachment.samples        = VK_SAMPLE_COUNT_1_BIT;
 		attachment.loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
 		attachment.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
@@ -603,7 +603,7 @@ void BilateralFilter::setup_render_pass()
 		render_pass_create_info.subpassCount           = 1;
 		render_pass_create_info.pSubpasses             = &subpass_description;
 
-		VK_CHECK(vkCreateRenderPass(device->get_handle(), &render_pass_create_info, nullptr, &filter_pass));
+		VK_CHECK(vkCreateRenderPass(get_device().get_handle(), &render_pass_create_info, nullptr, &filter_pass));
 	}
 
 	// main render pass
@@ -656,7 +656,7 @@ void BilateralFilter::setup_render_pass()
 		render_pass_create_info.dependencyCount		   = 1;
 		render_pass_create_info.pDependencies		   = &dependency;
 
-		VK_CHECK(vkCreateRenderPass(device->get_handle(), &render_pass_create_info, nullptr, &main_pass.render_pass));
+		VK_CHECK(vkCreateRenderPass(get_device().get_handle(), &render_pass_create_info, nullptr, &main_pass.render_pass));
 	}
 }
 
@@ -1030,7 +1030,7 @@ void BilateralFilter::setup_images()
 		VK_IMAGE_VIEW_TYPE_2D, storage_image->get_format());
 }
 
-std::unique_ptr<vkb::VulkanSample> create_bilateral_filter()
+std::unique_ptr<vkb::Application> create_bilateral_filter()
 {
 	return std::make_unique<BilateralFilter>();
 }

@@ -153,4 +153,4 @@ private:
 	void setup_images();
 };
 
-std::unique_ptr<vkb::VulkanSample> create_bilateral_filter();
+std::unique_ptr<vkb::Application> create_bilateral_filter();
