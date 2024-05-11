@@ -83,7 +83,7 @@ void TAAStats::build_command_buffers()
 
 		vkBeginCommandBuffer(cmd, &command_buffer_begin_info);
 
-		vkCmdResetQueryPool(cmd, query_pool, 0, 4);
+		vkCmdResetQueryPool(cmd, query_pool, 0, 2);
 
 		render_pass_begin_info.renderPass = main_pass.render_pass;
 		render_pass_begin_info.framebuffer = main_pass.framebuffer;
@@ -151,7 +151,8 @@ void TAAStats::build_command_buffers()
 			render_pass_begin_info.framebuffer = filter_pass_framebuffers[i];
 			render_pass_begin_info.renderPass  = filter_pass;
 			
-			vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, query_pool, type == COMP ? 2 : 0);
+			if (type != COMP)
+				vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, query_pool, 0);
 			vkCmdBeginRenderPass(cmd, &render_pass_begin_info, VK_SUBPASS_CONTENTS_INLINE);
 
 			VkViewport viewport = vkb::initializers::viewport(static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f);
@@ -186,7 +187,8 @@ void TAAStats::build_command_buffers()
 			vkCmdDraw(cmd, 3, 1, 0, 0);
 
 			vkCmdEndRenderPass(cmd);
-			vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool, type == COMP ? 3 : 1);
+			if (type != COMP)
+				vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool, 1);
 		}
 
 		{
@@ -337,36 +339,19 @@ void TAAStats::on_update_ui_overlay(vkb::Drawer &drawer)
 	}
 	
 	if (drawer.header("Frametime"))
-	{
-		if (type == COMP)
-		{
-			drawer.text("compute: %lf ms\nresolve: %lf ms\ntotal: %lf ms",
-				frametime_filter, frametime_resolve, frametime_filter + frametime_resolve);
-		}
-		else
-		{
-			drawer.text("total: %lf ms", frametime_filter);
-		}
+	{		
+		drawer.text("total: %lf ms", frametime_filter);
 	}
 
 	if (drawer.header("Average frametime"))
 	{
 		drawer.text("%llu frames", n_frames);
-		if (type == COMP)
-		{
-			drawer.text("compute: %lf ms\nresolve: %lf ms\ntotal: %lf ms", 
-				avg_frametime_filter, avg_frametime_resolve, avg_frametime_filter + avg_frametime_resolve);
-		}
-		else
-		{
-			drawer.text("total: %lf ms", avg_frametime_filter);
-		}
+		drawer.text("total: %lf ms", avg_frametime_filter);
 	}
 
 	if (reset)
 	{
 		avg_frametime_filter = 0.0;
-		avg_frametime_resolve = 0.0;
 		n_frames = 0;
 	}
 }
@@ -429,7 +414,6 @@ bool TAAStats::resize(uint32_t _width, uint32_t _height)
 	}
 
 	avg_frametime_filter = 0.0;
-	avg_frametime_resolve = 0.0;
 	n_frames = 0;
 
 	rebuild_command_buffers();
@@ -898,7 +882,7 @@ void TAAStats::setup_query_pool()
 	query_pool_info.pNext = nullptr;
 	query_pool_info.flags = 0;
 	query_pool_info.queryType = VK_QUERY_TYPE_TIMESTAMP;
-	query_pool_info.queryCount = 4;
+	query_pool_info.queryCount = 2;
 	query_pool_info.pipelineStatistics = 0;
 		
 	VK_CHECK(vkCreateQueryPool(get_device().get_handle(), &query_pool_info, nullptr, &query_pool));
@@ -956,19 +940,14 @@ void TAAStats::setup_descriptor_sets()
 
 void TAAStats::get_frame_time()
 {
-	uint64_t labels[4];
-	uint32_t count = type == COMP ? 4 : 2;
+	uint64_t labels[2];
+	uint32_t count = 2;
 
 	auto result = vkGetQueryPoolResults(get_device().get_handle(), query_pool, 0, count, sizeof(labels[0]) * count,
 		&labels, sizeof(labels[0]), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
 	
 	frametime_filter = ((labels[1] & mask) - (labels[0] & mask)) * get_device().get_gpu().get_properties().limits.timestampPeriod * 1e-6;
 	avg_frametime_filter = (frametime_filter + avg_frametime_filter * n_frames) / (n_frames + 1);
-	if (type == COMP)
-	{
-		frametime_resolve = ((labels[3] & mask) - (labels[2] & mask)) * get_device().get_gpu().get_properties().limits.timestampPeriod * 1e-6;
-		avg_frametime_resolve = (frametime_resolve + avg_frametime_resolve * n_frames) / (n_frames + 1);
-	}
 	++n_frames;
 }
 

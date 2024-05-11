@@ -91,7 +91,7 @@ void GaussianFilter::build_command_buffers()
 
 		vkBeginCommandBuffer(cmd, &command_buffer_begin_info);
 
-		vkCmdResetQueryPool(cmd, query_pool, 0, 6);
+		vkCmdResetQueryPool(cmd, query_pool, 0, 4);
 
 		render_pass_begin_info.renderPass = main_pass.render_pass;
 		render_pass_begin_info.framebuffer = main_pass.framebuffer;
@@ -219,7 +219,8 @@ void GaussianFilter::build_command_buffers()
 			render_pass_begin_info.framebuffer = filter_pass_framebuffers[i];
 			render_pass_begin_info.renderPass = filter_pass;
 
-			vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, query_pool, type == COMP ? 4 : type == LINEAR ? 2 : 0);
+			if (type != COMP)
+				vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, query_pool, type == LINEAR ? 2 : 0);
 			vkCmdBeginRenderPass(cmd, &render_pass_begin_info, VK_SUBPASS_CONTENTS_INLINE);
 
 			VkViewport viewport = vkb::initializers::viewport(static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f);
@@ -266,7 +267,9 @@ void GaussianFilter::build_command_buffers()
 				break;
 			}
 			vkCmdEndRenderPass(cmd);
-			vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool, type == COMP ? 5 : type == LINEAR ? 3 : 1);
+
+			if (type != COMP)
+				vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, query_pool, type == LINEAR ? 3 : 1);
 		}
 		
 		{
@@ -414,7 +417,7 @@ void GaussianFilter::on_update_ui_overlay(vkb::Drawer &drawer)
 	
 	if (drawer.header("Frametime"))
 	{
-		if (type == LINEAR)
+		if (type == LINEAR || type == COMP)
 		{
 			drawer.text("first pass: %lf ms\n"
 						"second pass: %lf ms\n"
@@ -422,19 +425,6 @@ void GaussianFilter::on_update_ui_overlay(vkb::Drawer &drawer)
 						frametime_first_pass,
 						frametime_second_pass,
 						frametime_first_pass + frametime_second_pass);
-		}
-		else if (type == COMP)
-		{
-			drawer.text("first pass: %lf ms\n"
-						"second pass: %lf ms\n"
-						"first + second sum: %lf ms\n"
-						"resolve: %lf ms\n"
-						"total: %lf ms",
-						frametime_first_pass,
-						frametime_second_pass,
-						frametime_first_pass + frametime_second_pass,
-						frametime,
-						frametime_first_pass + frametime_second_pass + frametime);
 		}
 		else
 		{
@@ -445,7 +435,7 @@ void GaussianFilter::on_update_ui_overlay(vkb::Drawer &drawer)
 	if (drawer.header("Average frametime"))
 	{
 		drawer.text("%llu frames", n_frames);
-		if (type == LINEAR)
+		if (type == LINEAR || type == COMP)
 		{
 			drawer.text("first pass: %lf ms\n"
 						"second pass: %lf ms\n"
@@ -453,19 +443,6 @@ void GaussianFilter::on_update_ui_overlay(vkb::Drawer &drawer)
 						avg_frametime_first_pass,
 						avg_frametime_second_pass,
 						avg_frametime_first_pass + avg_frametime_second_pass);
-		}
-		else if (type == COMP)
-		{
-			drawer.text("first pass: %lf ms\n"
-						"second pass: %lf ms\n"
-						"first + second sum: %lf ms\n"
-						"resolve: %lf ms\n"
-						"total: %lf ms",
-						avg_frametime_first_pass,
-						avg_frametime_second_pass,
-						avg_frametime_first_pass + avg_frametime_second_pass,
-						avg_frametime,
-						avg_frametime_first_pass + avg_frametime_second_pass + avg_frametime);
 		}
 		else
 		{
@@ -1116,7 +1093,7 @@ void GaussianFilter::setup_query_pool()
 	query_pool_info.pNext = nullptr;
 	query_pool_info.flags = 0;
 	query_pool_info.queryType = VK_QUERY_TYPE_TIMESTAMP;
-	query_pool_info.queryCount = 6;
+	query_pool_info.queryCount = 4;
 	query_pool_info.pipelineStatistics = 0;
 		
 	VK_CHECK(vkCreateQueryPool(get_device().get_handle(), &query_pool_info, nullptr, &query_pool));
@@ -1176,8 +1153,8 @@ void GaussianFilter::setup_descriptor_sets()
 
 void GaussianFilter::get_frame_time()
 {
-	uint64_t labels[6];
-	uint32_t count = type == COMP ? 6 : type == LINEAR ? 4 : 2;
+	uint64_t labels[4];
+	uint32_t count = type == COMP || type == LINEAR ? 4 : 2;
 
 	auto result = vkGetQueryPoolResults(get_device().get_handle(), query_pool, 0, count, sizeof(labels[0]) * count,
 		&labels, sizeof(labels[0]), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
@@ -1193,11 +1170,6 @@ void GaussianFilter::get_frame_time()
 		frametime_second_pass = ((labels[3] & mask) - (labels[2] & mask)) * get_device().get_gpu().get_properties().limits.timestampPeriod * 1e-6;
 		avg_frametime_first_pass = (frametime_first_pass + avg_frametime_first_pass * n_frames) / (n_frames + 1);
 		avg_frametime_second_pass = (frametime_second_pass + avg_frametime_second_pass * n_frames) / (n_frames + 1);
-		if (type == COMP)
-		{
-			frametime = ((labels[5] & mask) - (labels[4] & mask)) * get_device().get_gpu().get_properties().limits.timestampPeriod * 1e-6;
-			avg_frametime = (frametime + avg_frametime * n_frames) / (n_frames + 1);
-		}
 	}
 	++n_frames;
 }

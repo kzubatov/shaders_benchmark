@@ -126,10 +126,7 @@ private:
 	} pushConstCompute;
 
 	double frametime_filter  = 0.0;
-	double frametime_resolve = 0.0;
-
 	double avg_frametime_filter  = 0.0;
-	double avg_frametime_resolve = 0.0;
 
 	uint64_t n_frames = 0;
 
